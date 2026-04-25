@@ -33,9 +33,7 @@ def load_data(data_path, scan, force_offset=False, **kwargs):
 
     energy_offset = kwargs.get("energy_offset", 0)
     delay_offset = kwargs.get("delay_offset", 0)
-    delay_scan = kwargs.get("delay_scan", True)
-    tilt_scan = kwargs.get("tilt_scan", False)    
-    
+
     filename = f"Scan{scan}.h5"
     data_loader = DataLoader(data_path + '//' + filename, offsets = [energy_offset, delay_offset])
     
@@ -58,13 +56,8 @@ def load_data(data_path, scan, force_offset=False, **kwargs):
         else: 
             energy_offset = float(scan_info[str(scan)]['E_offset'])
 
-    if tilt_scan is True:
-        res = data_loader.load_phoibos(tilt_scan = True)
-    else:
-        res = data_loader.load_phoibos()
-
+    res = data_loader.load_phoibos()
     res = res.assign_coords(E=(res.E-energy_offset))
-    if "delay" in res.dims:
-        res = res.assign_coords(delay=(res.delay-delay_offset))
+    res = res.assign_coords(delay=(res.delay-delay_offset))
     
     return res

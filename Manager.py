@@ -206,24 +206,15 @@ class PlotHandler:
     def plot_edc(self):
         k_int, kx, ky, E, E_int, delay, delay_int = self.value_manager.get_values()
 
-        if self.check_button_manager.difference_button_status is True:
-            subtract_neg = True
-        else:
-            subtract_neg = False
-
-        edc = mpes.get_edc(self.I, kx, ky, k_int, k_int, delay=delay, delay_int=delay_int, subtract_neg = subtract_neg, neg_delays = [-250, -100])
+        edc = mpes.get_edc(self.I, kx, ky, k_int, k_int, delay, delay_int)
         edc = edc/np.max(edc)
         
-        if self.check_button_manager.enhance_button_status is True:
-            edc = mpes.enhance_features(edc, 0.3, 1, True)
-
         self.im_4, = self.ax[1].plot(self.I.E.values, edc, color = 'black')
-        self.ax[1].set_xticks(np.arange(-6,4,0.5))
-        for label in self.ax[1].xaxis.get_ticklabels()[1::2]:
-            label.set_visible(False)
-
-        self.ax[1].set_xlim([self.I.E.values[0], self.I.E.values[-1]])
+       # self.ax[1].set_xticks(np.arange(-400,1250,200))
+        #for label in self.ax[1].xaxis.get_ticklabels()[1::2]:
+         #   label.set_visible(False)
         self.ax[1].set_ylim([-0.1, 1.1])
+        self.ax[1].set_xlim([self.I.E.values[0], self.I.E.values[-1]])
         self.ax[1].set_title("EDC")
         self.ax[1].set_xlabel("Energy, eV")
         self.ax[1].set_ylabel("Intensity")
@@ -261,7 +252,7 @@ class PlotHandler:
         else:
             subtract_neg = False
 
-        energy_limits=[-2, 2]
+        energy_limits=[0.75, 2.5]
         
         f, a, wf = mpes.plot_waterfall(
             self.I, kx, k_int, ky, k_int,
@@ -365,26 +356,21 @@ class PlotHandler:
         k_int, kx, ky, E, E_int, delay, delay_int = self.value_manager.get_values()
         print('udpate edc')
 
-        if self.check_button_manager.difference_button_status is True:
-            subtract_neg = True
-        else:
-            subtract_neg = False
-
         if self.data_handler.I.ndim > 3:
-            edc = mpes.get_edc(self.I, kx, ky, k_int, k_int, delay=delay, delay_int=delay_int, subtract_neg = subtract_neg, neg_delays = [-250, -100])
+            edc = mpes.get_edc(self.I, kx, ky, k_int, delay, delay_int)
+        
         else:
-            edc = mpes.get_edc(self.I, kx, ky, k_int, k_int)
+            edc = mpes.get_edc(self.I, kx, ky, k_int, k_int, delay, delay_int)
             
         edc = edc/np.max(edc)
 
-        if self.check_button_manager.enhance_button_status is True:
-            e_enhance = 0.3
-            edc = mpes.enhance_features(edc, e_enhance, 1, True)
-            self.ax[1].axvline(e_enhance, color = 'red', linestyle = 'dashed')
-
+        if self.check_button_manager.enhance_check_button.get_status()[0] is True:
+            mask_start = (np.abs(self.I.E.values - 1.0)).argmin()
+            edc[mask_start:] *= 1/np.max(edc[mask_start:])
+            
         # Update the edc plots
         self.im_4.set_xdata(self.I.E.values)
-        self.im_4.set_ydata(edc)
+        self.im_4.set_ydata(edc/np.max(edc))
         self.ax[1].set_ylim([-0.1, 1.1])
         self.ax[1].set_xticks(np.arange(-6,4,0.5))
         for label in self.ax[1].xaxis.get_ticklabels()[1::2]:
@@ -472,9 +458,7 @@ class EventHandler:
             menu_items=[
                 ("Waterfall Plot", partial(self.waterfall_plot)),
                 ("Subtract Neg Delays",partial(self.show_difference_spectra)),
-                ("Choose k-cut",partial(self.choose_k_cut)),
-                ("EDC",partial(self.show_edc)),
-                ("Enhance",partial(self.enhance_exc_states)),
+                ("Chose k-cut",partial(self.choose_k_cut)),
                 ("Revert",partial(self.revert_to_original))
             ]
         )
@@ -500,40 +484,8 @@ class EventHandler:
         if self.check_button_manager.waterfall_button_status is True:
             ax.cla()  # Clear the subplot
             self.waterfall_handler.enable()
-        elif self.check_button_manager.edc_button_status is True:
-            self.plot_manager.update_edc()
-        elif self.check_button_manager.waterfall_button_status is False and self.check_button_manager.kcut_button_status is False and self.check_button_manager.edc_button_status is False:
-            self.plot_manager.update_time_trace()
-
-        self.plot_manager.fig.canvas.draw()
-    
-    def show_edc(self):
-        ax = self.plot_manager.ax[1]
-        ax.cla()  # Clear the subplot
-
-        print('edc-ing')
-        self.check_button_manager.edc_button_status = True
-
-        if self.check_button_manager.waterfall_button_status is True:
-            ax.cla()  # Clear the subplot
-            self.waterfall_handler.enable()
-        elif self.check_button_manager.edc_button_status is True:
-            self.plot_manager.plot_edc()
         elif self.check_button_manager.waterfall_button_status is False and self.check_button_manager.kcut_button_status is False:
-            self.plot_manager.plot_time_trace()
-
-        self.plot_manager.fig.canvas.draw()
-
-    def enhance_exc_states(self):
-        ax = self.plot_manager.ax[1]
-        print('create difference')
-        self.check_button_manager.enhance_button_status = True
-        
-        if self.check_button_manager.waterfall_button_status is True:
-            ax.cla()  # Clear the subplot
-            self.waterfall_handler.enable()
-        elif self.check_button_manager.edc_button_status is True:
-            self.plot_manager.update_edc()
+            self.plot_manager.update_time_trace()
 
         self.plot_manager.fig.canvas.draw()
 
@@ -560,15 +512,12 @@ class EventHandler:
         #ax.cla()  # Clear the subplot
         print('reverting')
         self.check_button_manager.difference_button_status = False
-        self.check_button_manager.enhance_button_status = False
-        self.check_button_manager.edc_button_status = False
 
         ax.cla()  # Clear the subplot
 
         if self.check_button_manager.waterfall_button_status is True:
             self.waterfall_handler.disable()
             self.check_button_manager.waterfall_button_status = False
-
         elif self.check_button_manager.kcut_button_status is True:
             self.arbitrary_cut_handler.disable()
             self.check_button_manager.kcut_button_status = False
@@ -674,9 +623,9 @@ class EventHandler:
             self.plot_manager.vertical_line_2.set_xdata(x = new_ky)
             self.plot_manager.update_square()  # Update square position
             
-            if self.check_button_manager.edc_button_status and self.check_button_manager.kcut_button_status is False and self.check_button_manager.waterfall_button_status is False:
+            if self.check_button_manager.trace_button_status and self.check_button_manager.kcut_button_status is False and self.check_button_manager.waterfall_button_status is False:
                 self.plot_manager.update_edc()
-            elif self.check_button_manager.edc_button_status is False and self.check_button_manager.kcut_button_status is False and self.check_button_manager.waterfall_button_status is False:
+            elif self.check_button_manager.trace_button_status is False and self.check_button_manager.kcut_button_status is False and self.check_button_manager.waterfall_button_status is False:
                 self.plot_manager.update_time_trace()
             #elif self.data_handler.I.ndim < 4:
              #   self.plot_manager.update_edc()
@@ -692,9 +641,9 @@ class EventHandler:
             self.plot_manager.vertical_line_1.set_xdata(x = new_kx)
             self.plot_manager.update_square()  # Update square position
 
-            if self.check_button_manager.edc_button_status and self.check_button_manager.kcut_button_status is False and self.check_button_manager.waterfall_button_status is False:
+            if self.check_button_manager.trace_button_status and self.check_button_manager.kcut_button_status is False and self.check_button_manager.waterfall_button_status is False:
                 self.plot_manager.update_edc()
-            elif  self.check_button_manager.edc_button_status is False and self.check_button_manager.kcut_button_status is False and self.check_button_manager.waterfall_button_status is False:
+            elif  self.check_button_manager.trace_button_status is False and self.check_button_manager.kcut_button_status is False and self.check_button_manager.waterfall_button_status is False:
                 self.plot_manager.update_time_trace()
                 
             self.plot_manager.fig.canvas.draw()
@@ -800,10 +749,10 @@ class ArbitraryCutHandler:
         # Revert to EDC or TimeTrace
         # if self.data_handler.I.ndim > 3:
         #     self.plot_handler.plot_time_trace()
-        if self.check_button_manager.edc_button_status is True:
+        if self.check_button_manager.trace_button_status is True:
             self.plot_manager.plot_edc()
         
-        elif self.check_button_manager.edc_button_status is False and self.check_button_manager.waterfall_button_status is False:
+        elif self.check_button_manager.trace_button_status is False and self.check_button_manager.waterfall_button_status is False:
             self.plot_manager.plot_time_trace()
         #elif self.check_button_manager.waterfall_button_status is True:
          #   self.waterfall_handler.enable()
@@ -833,28 +782,28 @@ class waterfallHandler:
         #self.wf.set_visible(False)
         #self.plot_manager.im_4.set_visible(True)
 
-        if self.check_button_manager.edc_button_status is True:
+        if self.check_button_manager.trace_button_status is True:
             self.plot_manager.plot_edc()
-        elif self.check_button_manager.edc_button_status is False and self.check_button_manager.kcut_button_status is False:
+        elif self.check_button_manager.trace_button_status is False and self.check_button_manager.kcut_button_status is False:
             self.plot_manager.plot_time_trace()
 
         self.plot_manager.fig.canvas.draw()
 
 class CheckButtonManager:
     def __init__(self):
-        self.edc_button = self.create_edc_button()
+        self.trace_check_button = self.create_trace_check_button()
         self.enhance_check_button = self.create_enhance_check_button()
         self.kcut_check_button = self.create_kcut_check_button()  # for arb. k cut
         self.waterfall_button = self.create_waterfall_button()  # for arb. k cut
         self.difference_button = self.create_difference_button()  # for arb. k cut
 
-        self.edc_button_status = False # for EDC
+        self.trace_button_status = False # for EDC
         self.enhance_button_status = False #for enhance CB
         self.kcut_button_status = False  # for arb. k cut
         self.waterfall_button_status = False  # for k-intergrated waterfall dynamics
         self.difference_button_status = False  # for k-intergrated waterfall dynamics
 
-    def create_edc_button(self):
+    def create_trace_check_button(self):
         ax = plt.axes([0.005, 0.5, 0.06, 0.05])
         trace_check_button = CheckButtons(ax, ['EDC'])
         
@@ -991,7 +940,7 @@ class ClickButtonManager:
         # Clear all lines from ax[1]
         self.plot_manager.ax[1].cla()  # Clear the axis
         
-        if self.check_button_manager.edc_button_status:
+        if self.check_button_manager.trace_button_status:
             self.plot_manager.plot_edc()
         else:
             self.plot_manager.plot_time_trace()
@@ -1009,7 +958,7 @@ class SliderManager:
         
     def create_sliders(self):
         """Create the sliders for energy and delay."""
-        E_slider = Slider(plt.axes([0.015, 0.6, 0.03, 0.25]), 'E, eV', -6, 5, valinit=0, valstep = 0.05, color = 'black', orientation = 'vertical')
+        E_slider = Slider(plt.axes([0.015, 0.6, 0.03, 0.25]), 'E, eV', -6, 3, valinit=0, valstep = 0.05, color = 'black', orientation = 'vertical')
         E_int_slider = Slider(plt.axes([0.057, 0.6, 0.03, 0.25]), '$\Delta$E, eV', 0, 500, valinit=100, valstep = 50, color = 'grey', orientation = 'vertical')
         k_int_slider = Slider(plt.axes([0.42, 0.6, 0.03, 0.25]), '$\Delta k$, $A^{-1}$', 0, 4, valinit=.5, valstep = 0.1, color = 'red', orientation = 'vertical')
         delay_slider = Slider(plt.axes([0.055, 0.02, 0.25, 0.03]), 'Delay, fs', -200, 1000, valinit=500, valstep = 20, color = 'purple', orientation = 'horizontal')
@@ -1033,15 +982,15 @@ class SliderManager:
         self.value_manager.update_delay_value(delay)
         self.value_manager.update_delay_int_value(delay_int)
 
-        self.plot_manager.update_lines()
+        #self.plot_manager.update_lines()
         self.plot_manager.update_square()
         self.plot_manager.update_kxky_image()
         #self.plot_manager.update_kx_image()
         #self.plot_manager.update_ky_image()
-        if self.check_button_manager.edc_button_status is True and self.check_button_manager.kcut_button_status is False and self.check_button_manager.waterfall_button_status is False:
+        if self.check_button_manager.trace_button_status is True and self.check_button_manager.kcut_button_status is False and self.check_button_manager.waterfall_button_status is False:
             self.plot_manager.update_edc()
 
-        elif self.check_button_manager.edc_button_status is False and self.check_button_manager.kcut_button_status is False and self.check_button_manager.waterfall_button_status is False:
+        elif self.check_button_manager.trace_button_status is False and self.check_button_manager.kcut_button_status is False and self.check_button_manager.waterfall_button_status is False:
             print('updating time trace after slider')
             self.plot_manager.update_time_trace()
 
