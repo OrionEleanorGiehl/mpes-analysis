@@ -7,20 +7,23 @@ Created on Mon Mar 10 11:15:40 2025
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import matplotlib.colors as col
-from matplotlib.ticker import AutoLocator
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.patches import Rectangle
 from matplotlib.patches import Polygon
 from matplotlib.ticker import FormatStrFormatter
 from matplotlib.colors import LogNorm
+import matplotlib.patheffects as pe
 import xarray as xr
 from scipy.special import erf
 from scipy.optimize import curve_fit
 from scipy.signal import fftconvolve
-from scipy import signal
-from scipy.fft import fft, fftshift
+from scipy.optimize import curve_fit
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
+from lmfit import Model
+from sigfig import round
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+import csv
 
 #%% Useful Functions and Definitions for Manipulating Data
 
@@ -50,10 +53,13 @@ def get_data_chunks(I, neg_times, t0, ax_delay_offset):
         I_sum = I
 
 # Function for Creating MM Constant Energy kx, ky slice 
-def get_momentum_map(I_res, E, E_int, delay=None, delay_int=None):
-    
+def get_momentum_map(I_res, E, E_int, delay=None, delay_int=None, **kwargs):
+    subtract_neg = kwargs.get('subtract_neg', False)
+    neg_delays = kwargs.get('neg_delays', (-250,-100))
     # Integrate over energy window
     I_E = I_res.loc[{"E":slice(E - E_int / 2, E + E_int / 2)}].mean(dim="E")
+    if subtract_neg:
+        I_E = I_E - I_E.loc[{"delay":slice(neg_delays[0],neg_delays[1])}].mean(dim='delay')
 
     if "delay" in I_res.dims:
         if delay is not None and delay_int is not None:
@@ -62,22 +68,17 @@ def get_momentum_map(I_res, E, E_int, delay=None, delay_int=None):
         else:
             # No delay specified: average over entire delay axis
             frame = I_E.mean(dim="delay").T
+        
+        frame = frame.assign_attrs(delay=delay, delay_int=delay_int)
     else:
         frame = I_E.T
 
+    frame = frame.assign_attrs(E=E, E_int=E_int)
     return frame
 
-def get_kx_E_frame(I_res, ky, ky_int, delay=None, delay_int=None, **kwargs):
+def get_kx_E_frame(I_res, ky, ky_int, delay, delay_int):
     
-    subtract_neg = kwargs.get("subtract_neg", False)
-    neg_delays = kwargs.get("neg_delays", [-200, -100])
-
-    d1, d2 = neg_delays[0], neg_delays[1]
-
-    if "ky" in I_res.dims:
-        I_ky = I_res.loc[{"ky":slice(ky-ky_int/2, ky+ky_int/2)}].mean(dim="ky")
-    elif "angle" in I_res.dims:
-        I_ky = I_res
+    I_ky = I_res.loc[{"ky":slice(ky-ky_int/2, ky+ky_int/2)}].mean(dim="ky")
 
     if "delay" in I_res.dims:
         if delay is not None and delay_int is not None:
@@ -86,26 +87,14 @@ def get_kx_E_frame(I_res, ky, ky_int, delay=None, delay_int=None, **kwargs):
         else:
             # No delay specified: average over entire delay axis
             frame = I_ky.mean(dim="delay")
-
-        if subtract_neg is True:
-            frame = frame - I_ky.loc[{"delay":slice(d1,d2)}].mean(dim="delay")
-
     else:
         frame = I_ky
-         
+                    
     return frame
 
-def get_ky_E_frame(I_res, kx, kx_int, delay=None, delay_int=None, **kwargs):
-    
-    subtract_neg = kwargs.get("subtract_neg", False)
-    neg_delays = kwargs.get("neg_delays", [-200, -100])
+def get_ky_E_frame(I_res, kx, kx_int, delay, delay_int):
 
-    d1, d2 = neg_delays[0], neg_delays[1]
-
-    if "ky" in I_res.dims:
-        I_kx = I_res.loc[{"kx":slice(kx-kx_int/2, kx+kx_int/2)}].mean(dim="kx")
-    elif "angle" in I_res.dims:
-        I_kx = I_res.loc[{"angle":slice(kx-kx_int/2, kx+kx_int/2)}]
+    I_kx = I_res.loc[{"kx":slice(kx-kx_int/2, kx+kx_int/2)}].mean(dim="kx")
 
     if "delay" in I_res.dims:
         if delay is not None and delay_int is not None:
@@ -114,10 +103,6 @@ def get_ky_E_frame(I_res, kx, kx_int, delay=None, delay_int=None, **kwargs):
         else:
             # No delay specified: average over entire delay axis
             frame = I_kx.mean(dim="delay")
-        
-        if subtract_neg is True:
-            frame = frame - I_kx.loc[{"delay":slice(d1,d2)}].mean(dim="delay")
-    
     else:
         frame = I_kx
                     
@@ -137,7 +122,7 @@ def get_waterfall(I_res, kx, kx_int, ky=None, ky_int=None):
 
     return frame
 
-def get_k_cut(I, k_start, k_end, **kwargs):
+def get_k_cut(I, k_start, k_end, delay, delay_int, n, w):
     """
     Extract an E vs k slice along an arbitrary line in kx-ky space.
 
@@ -152,13 +137,7 @@ def get_k_cut(I, k_start, k_end, **kwargs):
     - k_vals: 1D array of k-distance along the cut
     - E_vals: 1D array of energies
     """
-    delay = kwargs.get("delay", None)
-    delay_int = kwargs.get("delay_int", None)
-
-    n = kwargs.get("n", 100)
-    w = kwargs.get("w", 0.2)
-
-    num_k = n
+    num_k=n
     
     if "delay" in I.dims:
         if delay is not None and delay_int is not None:
@@ -239,7 +218,7 @@ def get_k_cut(I, k_start, k_end, **kwargs):
 
     return k_frame
 
-# Fucntion for Extracting time Traces
+
 def get_time_trace(I_res, E, E_int, k, k_int, norm_trace = False, **kwargs):
     # At the top of your function
     #if isinstance(k, (int, float)):
@@ -278,60 +257,19 @@ def get_time_trace(I_res, E, E_int, k, k_int, norm_trace = False, **kwargs):
 
     return trace
 
-def get_edc(I_res, k, k_int, **kwargs):
-
-    delay = kwargs.get("delay", 500)
-    delay_int = kwargs.get("delay_int", 1000)
-
-    subtract_neg = kwargs.get("subtract_neg", False)
-    neg_delays = kwargs.get("neg_delays", [-200, -100])
-    norm_trace = kwargs.get("norm_trace", False)
-
-    if "kx" in I_res.dims and "ky" in I_res.dims:
-        (kx, ky) = k
-        (kx_int, ky_int) = k_int
-
-        if I_res.ndim > 3:    
-            edc_all = I_res.loc[{"kx":slice(kx-kx_int/2, kx+kx_int/2), "ky":slice(ky-ky_int/2, ky+ky_int/2)}].mean(dim=("kx", "ky"))
-
-            if subtract_neg is True:
-                edc_neg = edc_all.loc[{"delay":slice(neg_delays[0],neg_delays[1])}].mean(dim="delay")
-                edc_sel = I_res.loc[{"kx":slice(kx-kx_int/2, kx+kx_int/2), "ky":slice(ky-ky_int/2, ky+ky_int/2), "delay":slice(delay-delay_int/2,delay+delay_int/2)}].mean(dim=("kx", "ky", "delay"))
-                edc = edc_sel - edc_neg
-            else:
-                edc = I_res.loc[{"kx":slice(kx-kx_int/2, kx+kx_int/2), "ky":slice(ky-ky_int/2, ky+ky_int/2), "delay":slice(delay-delay_int/2,delay+delay_int/2)}].mean(dim=("kx", "ky", "delay"))
-
-        else:
-            edc = I_res.loc[{"kx":slice(kx-kx_int/2, kx+kx_int/2), "ky":slice(ky-ky_int/2, ky+ky_int/2)}].mean(dim=("kx", "ky"))
-
-    elif "angle" in I_res.dims:
-        #(angle,) = k
-        #(angle_int,) = k_int
-        if "tilt" in I_res.dims:
-            (angle, tilt), (angle_int, tilt_int) = k, k_int
-            edc_all = I_res.loc[{"tilt":slice(tilt-tilt_int/2, tilt+tilt_int/2), "angle":slice(angle-angle_int/2, angle+angle_int/2)}].mean(dim=("angle", "tilt"))
-        else:
-            angle, angle_int = k, k_int
-            edc_all = I_res.loc[{"angle":slice(angle-angle_int/2, angle+angle_int/2)}].mean(dim="angle")
-
-        if subtract_neg is True:
-            edc_neg = edc_all.loc[{"delay":slice(neg_delays[0],neg_delays[1])}].mean(dim="delay")
-            edc_sel = edc_all.loc[{"delay":slice(delay-delay_int/2,delay+delay_int/2)}].mean(dim="delay")
-            edc = edc_sel - edc_neg
-        elif subtract_neg is False and "delay" in I_res.dims:
-            edc = edc_all.loc[{"delay":slice(delay-delay_int/2,delay+delay_int/2)}].mean(dim="delay")
-        elif "delay" not in I_res.dims:
-            edc = edc_all
-
-    if norm_trace is True:
-        edc = edc/np.max(edc)
+def get_edc(I_res, kx, ky, kx_int, ky_int, delay=0, delay_int=4000):
+        
+    if I_res.ndim > 3:    
+        edc = I_res.loc[{"kx":slice(kx-kx_int/2, kx+kx_int/2), "ky":slice(ky-ky_int/2, ky+ky_int/2), "delay":slice(delay-delay_int/2,delay+delay_int/2)}].mean(dim=("kx", "ky", "delay"))
+    else:
+        edc = I_res.loc[{"kx":slice(kx-kx_int/2, kx+kx_int/2), "ky":slice(ky-ky_int/2, ky+ky_int/2)}].mean(dim=("kx", "ky"))
 
     return edc
 
 def enhance_features(I_res, Ein, factor, norm):
     
-    I1 = I_res.loc[{"E":slice(-3.5,Ein)}]
-    I2 = I_res.loc[{"E":slice(Ein,3.5)}]
+    I1 = I_res.loc[{"E":slice(-6,Ein)}]
+    I2 = I_res.loc[{"E":slice(Ein,6.5)}]
 
     if norm is True:
         I1 = I1/np.max(I1)
@@ -391,7 +329,7 @@ def find_t0(trace_ex, delay_limits, fig=None, ax=None, **kwargs):
         r = 0.5 * (1 + erf((t - t0) / (tau)))
         return r
             
-    p0 = [50, 45]
+    p0 = [0.050, 0.045]
     #delay_limits = [-200,60]
 
     delay_axis = trace_ex.loc[{"delay":slice(delay_limits[0],delay_limits[1])}].delay.values
@@ -401,36 +339,265 @@ def find_t0(trace_ex, delay_limits, fig=None, ax=None, **kwargs):
         delay_trace = delay_trace/np.max(delay_trace)
 
     popt, pcov = curve_fit(rise_erf, delay_axis, delay_trace, p0, method="lm")
-
+    
     perr = np.sqrt(np.diag(pcov))
     
     rise_fit = rise_erf(np.linspace(delay_limits[0],delay_limits[1], 50), *popt)
-
-    rise_fit_xr = xr.DataArray(
-        rise_fit,
-        dims=("delay"),
-        coords={"delay": np.linspace(delay_limits[0],delay_limits[1], 50)},
-        name="rise_fit"
-    )
-
+    
     if fig is not None:
         
         ax[1].plot(trace_ex.delay, trace_ex, 'ko',label='Data')
         ax[1].plot(np.linspace(delay_limits[0],delay_limits[1],50), rise_fit, 'red',label='Fit')
         #ax[1].plot(I_res.delay, rise, 'red')
-        ax[1].set_xlabel('Delay, fs')
+        ax[1].set_xlabel(r'Delay $\Delta t$ [ps]')
         ax[1].set_ylabel('Norm. Int.')
         ax[1].axvline(0, color = 'grey', linestyle = 'dashed')
         
-        ax[1].set_xlim([trace_ex.delay.values[1], 150]) 
+        ax[1].set_xlim([-0.4, 0.4]) 
         ax[1].set_ylim(-.1,1.05)
         #ax[1].axvline(30)
         ax[1].legend(frameon=False)
 
-    print(fr't0 = {popt[0]:.1f} +/- {perr[0]:.1f} fs')
-    print(fr'width = {popt[1]:.1f} +/- {perr[1]:.1f} fs')
+    print(fr't0 = {popt[0]:.3f} +/- {perr[0]:.3f} ps')
+    print(fr'width = {popt[1]:.3f} +/- {perr[1]:.3f} ps')
     
-    return popt, perr, rise_fit_xr
+    return popt, perr, rise_fit
+
+
+def t0_alt(I_res, Labels, fig=None, ax=None, **kwargs):
+    '''
+    Determines t0 by fitting an Error Function to the VB Dynamics
+    
+    params:
+    - I_res: List of Normalized Spectra
+    - Labels: List of Labels
+    - fig: Figure to which the Result is plotted. If not specified, no plot is created
+    - ax: Ax to which the Result is plotted. If not specified, no plot is created
+
+    Optional kwargs:
+    - kx: x-Coordinate for Center of Momentum-Integration (default: 0)
+    - ky: y-Coordinate for Center of Momentum-Integration (default: 0)
+    - kx_int: x-Width of Momentum-Integration (default: 4)
+    - ky_int: y-Width of Momentum-Integration (default: 4)
+    - delay_limits: List of Tuples of Delay Limits over which the Fits will be evaluated (default: [(-0.2, 0.15)])
+    - neg_delays: List of Tuples of Negative Delays which will be subtracted from the Time Traces (default [(-0.3, -0.1)])
+    - E_limits: Energy Integration range over which the Time Traces will be evaluated. A Window near the VB works best. (default: (0, 0.2))
+    - xlims: Tuple of Limits for the x-Axis of the plot (default: (-0.3, 0.5))
+    - fontsize: Fontsize. Legend and Ticklabels are 3 smaller than main Fontsize. (default: 15)
+    '''
+    kx = kwargs.get('kx', 0)
+    ky = kwargs.get('ky', 0)
+    kx_int = kwargs.get('kx_int', 4)
+    ky_int = kwargs.get('ky_int', 4)
+    delay_limits = kwargs.get('delay_limits', [(-200, 150)])
+    neg_delays = kwargs.get('neg_delays', [(-300, -100)])
+    E_limits = kwargs.get('E_limits', (0, 0.2))
+    xlims = kwargs.get('xlims', (-300, 500))
+    fontsize = kwargs.get('fontsize', 15)
+
+    E_center = (E_limits[1] - E_limits[0])/2
+    E_int = (E_limits[1] + E_limits[0])/2
+
+    N = len(I_res)
+    colormap = mpl.colormaps['viridis']
+    colors = kwargs.get('colors', colormap(np.linspace(0.2,1, N)))
+    
+    delay_axs = []
+    I_clipped = []
+    for i in range(N):
+        I_clipped.append(I_res[i].loc[{'E':slice(E_limits[0], E_limits[1])}])
+        delay_axs.append(I_clipped[i].delay.values)
+        delay_axs[i] = np.array(delay_axs[i])
+
+    # Get TimeTraces in defined Delay Range
+    TimeTraces = []
+    for i in range(N):
+        TimeTraces.append(get_time_trace(I_clipped[i], E_center, E_int, norm_trace=True, subtract_neg=True, neg_delays=neg_delays[i], k=(kx, ky), k_int=(kx_int, ky_int)))
+    
+    def rise_erf(t, t0, tau):
+        r = 0.5 * (1 + erf((t - t0) / (tau)))
+        return r
+    
+    initial_params = [0, 50] #t0, tau
+
+    # Clip TimeTrace to delay Range
+    TimeTraces_clipped = []
+    delay_axs_clipped = []
+    for i in range(N):
+        temp = TimeTraces[i].loc[{'delay':slice(delay_limits[i][0], delay_limits[i][1])}]
+        TimeTraces_clipped.append(temp.values)
+        delay_axs_clipped.append(temp.delay.values)
+
+    # Prepare Lists for optimal parameters, covariance matrix & uncertainties of optimal parameters
+    optimal_params = [i for i in range(N)]
+    covar_matrix = [i for i in range(N)]
+    uncertainties = [i for i in range(N)]
+
+    # Determine optimal parameters through curve fit annd calculate uncertainties
+    for i in range(N):
+        optimal_params[i], covar_matrix[i] = curve_fit(rise_erf, delay_axs_clipped[i], TimeTraces_clipped[i], initial_params)
+        uncertainties[i] = np.sqrt(np.diag(covar_matrix[i]))
+    
+    # Read out t0
+    t0 = [optimal_params[i][0] for i in range(N)]
+    t0_strings = []
+    for i in range(N):
+        t0_strings.append(round(str(t0[i]), uncertainties[i][0], cutoff=19, sep='external_brackets'))
+        #print(fr'{Labels[i]:25}: t0 = ({t0[i]:6.3f} +- {uncertainties[i][0]:.3f}) ps')
+        print(fr'{Labels[i]:25}: t0 = {t0_strings[i]} fs')
+        t0_strings[i] = fr'$t_0$ = {t0_strings[i]} fs'
+
+    if fig is not None:
+        t_plot = []
+        t_tail0 = []
+        t_tail1 = []
+        for i in range(N):
+            t_plot.append(np.linspace(delay_limits[i][0], delay_limits[i][1], num=1000))
+            t_tail0.append(np.linspace(delay_axs[0].min(), delay_limits[i][0], num=500))
+            t_tail1.append(np.linspace(delay_limits[i][1], delay_axs[0].max(), num=500))
+
+        fit_curve = [rise_erf(t_plot[i], *optimal_params[i]) for i in range(N)]
+        fit_tail0 = [rise_erf(t_tail0[i], *optimal_params[i]) for i in range(N)]
+        fit_tail1 = [rise_erf(t_tail1[i], *optimal_params[i]) for i in range(N)]
+
+        
+        markerstyles = ['o', 's', 'D', '^', 'H', 'P', '8']
+
+        for i in range(N):
+            #ax.vlines(t0[i], ymin=-0.1, ymax=1.05, color=colors[i], alpha=0.5,
+            #          path_effects=[pe.Stroke(linewidth=3, foreground='black', alpha=0.5), pe.Stroke(foreground='white', alpha=1), pe.Normal()])
+            #TimeTraces[i].plot.scatter(label=Labels[i], marker=markerstyles[i], color=colors[i], alpha=0.5, edgecolors='black')
+            TimeTraces[i].plot(label=Labels[i], color=colors[i], alpha=0.7, lw=3,
+                    path_effects=[pe.Stroke(linewidth=6, foreground='black', alpha=0.6), pe.Stroke(foreground='white', alpha=1), pe.Normal()])
+            #ax.plot(t_tail0[i], fit_tail0[i], color=colors[i], alpha=0.5, ls='dotted')
+            #ax.plot(t_tail1[i], fit_tail1[i], color=colors[i], alpha=0.5, ls='dotted')
+            #ax.plot(t_plot[i], fit_curve[i], color=colors[i], alpha=0.9, lw=2.5, label=t0_strings[i],
+            #        path_effects=[pe.Stroke(linewidth=5, foreground='black', alpha=0.5), pe.Stroke(foreground='white', alpha=1), pe.Normal()])
+            ax.plot(t_plot[i], fit_curve[i], color='black', lw=2.5, label=t0_strings[i], ls='solid')
+            ax.vlines(t0[i], ymin=-0.1, ymax=1.05, color='black', ls='dashed', lw=2)
+
+        
+        ax.legend(fontsize=fontsize-1)
+        #ax.axvline(delay_limits[0][0], color='grey', alpha=0.5)
+        #ax.axvline(delay_limits[0][1], color='grey', alpha=0.5)
+        ax.set_ylim(-0.05, 1.05)
+        ax.set_xlim(xlims[0], xlims[1])
+        ax.tick_params(labelsize=fontsize-1)
+        ax.set_xlabel(r'Delay $\Delta t$ [fs]', fontsize=fontsize)
+        ax.set_ylabel('Normalized Intensity', fontsize=fontsize)
+
+def VBMfromRisingEdge(I_res, Labels, fig=None, ax=None, **kwargs):
+    '''
+    Determines E_VBM by fitting a linear Function to the Rising Edge
+
+    Parameters:
+    - I_res: List of Normalized Spectra
+    - Labels: List of Labels
+    - fig: Figure to which the Result is plotted. If not specified, no plot is created
+    - ax: Ax to which the Result is plotted. If not specified, no plot is created
+    
+    Optional kwargs:
+    - kx: x-Coordinate for Center of Momentum-Integration (default: 0)
+    - ky: y-Coordinate for Center of Momentum-Integration (default: 0)
+    - kx_int: x-Width of Momentum-Integration (default: 4)
+    - ky_int: y-Width of Momentum-Integration (default: 4)
+    - E_limits: Tuple of Energy Limits over which the EDCs will be evaluated. Smaller Interval can significantly improve Computation Time. (default: (-6, 1))
+    - fit_limits: Tuple of Energy Limits in which E_VBM is expected to be found (default: (-0.5, 0.5))
+    - show_fit_lims: Bool deciding if the Fit Limits are plotted with grey lines as a visual aid (default: True)
+    - fontsize: Fontsize. Legend and Ticklabels are 3 smaller than main Fontsize. (default: 15)
+    '''
+    kx = kwargs.get('kx', 0)
+    ky = kwargs.get('ky', 0)
+    kx_int = kwargs.get('kx_int', 4)
+    ky_int = kwargs.get('ky_int', 4)
+    E_limits = kwargs.get('E_limits', (-6,1))
+    fit_limits = kwargs.get('fit_limits', (-0.5, 0.5))
+    show_fit_lims = kwargs.get('show_fit_lims', True)
+    fontsize = kwargs.get('fontsize', 15)
+    
+    colormap = mpl.colormaps['viridis']
+    N = len(I_res)
+    colors = kwargs.get('colors', colormap(np.linspace(0.2,1, N)))
+
+    E_axs = [] # Make Energy Axes for plotting
+    I_clipped = []
+    for i in range(N):
+        I_clipped.append(I_res[i].loc[{"E":slice(E_limits[0], E_limits[1])}]) # Spectra get clipped to E_limits to save time on EDC Computations
+        E_axs.append(I_clipped[i].E.values)
+        E_axs[i] = np.array(E_axs[i])
+
+    # Get EDCs in defined Energy Range
+    EDCs = []
+    print(fr'Computing EDCs... (0/{N})', end='\r')
+    for i in range(N):
+        EDCs.append(get_edc(I_clipped[i], kx, ky, kx_int, ky_int))
+        print(fr'Computing EDCs... ({i+1}/{N})', end='\r')
+        EDCs[i] = EDCs[i]/np.max(EDCs[i])
+        EDCs[i] = EDCs[i].loc[{"E":slice(E_limits[0], E_limits[1])}].values
+
+    # Make Linear Fit Model to determine E0
+    def Linear(E,E_VBM,a):
+        return a*(E-E_VBM)
+
+    initial_params = (0, 1) # E_VBM, a
+
+    fit_indices = [] # List which will contain the indices over which the EDCs should be fitted
+    E_fit = [] # Energy axes over which the fits will run
+    EDCs_fit = [] # EDCs over which the fits will run
+    # Find indices where Energy axis is between the fit limits and EDC is greater than 0.05, then write that section of Energy axes and EDCs into the lists
+    for k in range(N):
+        E_temp = E_axs[k]
+        EDC_temp = EDCs[k]
+        fit_indices.append([i for i in range(E_temp.shape[0]) if E_temp[i]>fit_limits[0] if E_temp[i]<fit_limits[1] if EDC_temp[i]>0.05])
+        indices_temp = fit_indices[k]
+        E_fit.append(E_temp[indices_temp[0]:indices_temp[-1]])
+        EDCs_fit.append(EDC_temp[indices_temp[0]:indices_temp[-1]])
+
+    # Prepare Lists for optimal parameters, covariance matrix & uncertainties of optimal parameters
+    optimal_params = [i for i in range(N)]
+    covar_matrix = [i for i in range(N)]
+    uncertainties = [i for i in range(N)]
+
+    # Determine optimal parameters through curve fit annd calculate uncertainties
+    for i in range(N):
+        optimal_params[i], covar_matrix[i] = curve_fit(Linear, E_fit[i], EDCs_fit[i], initial_params)
+        uncertainties[i] = np.sqrt(np.diag(covar_matrix[i]))
+
+    # Read out E_VBM
+    E_VBM = [optimal_params[i][0] for i in range(N)]
+    E_VBM_strings = []
+    for i in range(N):
+        E_VBM_strings.append(round(str(E_VBM[i]), uncertainties[i][0], cutoff=19, sep='external_brackets'))
+        print(fr'{Labels[i]:25}: E_VBM = {E_VBM_strings[i]} eV')
+        E_VBM_strings[i] = fr'$E_{{\mathrm{{VBM}}}}$ = {E_VBM_strings[i]} eV'
+
+    if fig is not None:
+        E_plot = [np.linspace(fit_limits[0], E_VBM[i]) for i in range(len(E_VBM))] # Best Fits should be plotted from lower bound until E_VBM
+
+        fit_curve = [Linear(E_plot[i], *optimal_params[i]) for i in range(N)]
+
+        
+        FitLabels = []
+        for i in range(N):
+            FitLabels.append(fr'$E_{{\mathrm{{VBM}}}}$')
+            ax.plot(E_axs[i], EDCs[i], color=colors[i], alpha=0.7, lw=3, label=Labels[i],
+                    path_effects=[pe.Stroke(linewidth=6, foreground='black', alpha=0.6), pe.Stroke(foreground='white', alpha=1), pe.Normal()])
+            #ax.plot(E_plot[i], fit_curve[i], color=colors[i], alpha=0.9, ls='dashed', lw=2.5, label=E_VBM_strings[i],
+            #        path_effects=[pe.Stroke(linewidth=5, foreground='black', alpha=0.5), pe.Stroke(foreground='white', alpha=1), pe.Normal()])
+            ax.plot(E_plot[i], fit_curve[i], color='black', ls='solid', lw=2.5, label=E_VBM_strings[i])
+            #ax.vlines(optimal_params[i][0], ymin=-.05, ymax=1.05, color=colors[i], alpha=0.7, ls='solid',
+            #          path_effects=[pe.Stroke(linewidth=3, foreground='black', alpha=0.5), pe.Stroke(foreground='white', alpha=1), pe.Normal()])
+            ax.axvline(optimal_params[i][0], color='black', ls='dashed', lw=2)
+    
+        if show_fit_lims:
+            ax.axvline(fit_limits[0], color='grey', alpha=0.5)
+            ax.axvline(fit_limits[1], color='grey', alpha=0.5)
+        ax.legend(fontsize=fontsize-1)
+        ax.set_ylim(-.05,1.05)
+        ax.set_xlim(E_limits[0], E_limits[1])
+        ax.tick_params(labelsize=fontsize-1)
+        ax.set_xlabel(fr'$E-E_{{\mathrm{{VBM}}}}$ [eV]', fontsize=fontsize)
+        ax.set_ylabel(fr'Normalized Intensity', fontsize=fontsize)
 
 # Useful Functions and Definitions for Plotting Data
 def save_figure(fig, name, image_format):
@@ -438,57 +605,34 @@ def save_figure(fig, name, image_format):
     fig.savefig(name + '.'+ image_format, bbox_inches='tight', format=image_format)
     print('Figure Saved!')
 
-def plot_edc(I, k, k_int, fig=None, ax=None, **kwargs):
+def plot_edc(I, kx, ky, kx_int, ky_int, label=None, fig=None, ax=None, **kwargs):
     
-    fontsize = kwargs.get("fontsize", 14)
-    norm_trace = kwargs.get("norm_trace", False)
-    color = kwargs.get("color", 'black')
-    subtract_neg = kwargs.get("subtract_neg", False)
-    delay = kwargs.get("delay", 500)
-    delay_int = kwargs.get("delay_int", 1000)
-    E_enhance = kwargs.get("E_enhance", None)
+    fontsize = kwargs.get("fontsize", 15)
+    colormap = mpl.colormaps['viridis']
+    color = kwargs.get('color', colormap(0.6))
+    xlim = kwargs.get('xlim', (I.E.min(), I.E.max()))
+    ylim = kwargs.get('ylim', (0,1.05))
+    delay = kwargs.get('delay', 0)
+    delay_int = kwargs.get('delay_int', 2000)
+    
+    if label is None:
+        label =''
 
     if ax is None or fig is None:
         fig, ax = plt.subplots(1, 1, figsize=(4,2), squeeze=False)
-        #ax = np.ravel(ax)
-    #else:
-        #ax = np.ravel(ax)
-
-    edc = get_edc(I, k ,k_int, **kwargs)
-
-    if E_enhance is not None:    
-        edc = enhance_features(edc, E_enhance, factor = 0, norm = True)
-        ax.axvline(E_enhance, linestyle = 'dashed', color = 'black', linewidth = 1)
-    
-    edc.plot(ax=ax, color = color)
-
-    # Formatting
-    ax.set_xlabel('Energy, eV', fontsize=fontsize)
-    ax.set_ylabel('Int.' , fontsize=fontsize)
-    
-    ax.xaxis.reset_ticks()
-    ax.yaxis.reset_ticks()
-
-    ax.set_xticks(np.arange(-5,4,0.5))
-    
-    for label in ax.xaxis.get_ticklabels():
-        label.set_visible(True)
-
-    for label in ax.xaxis.get_ticklabels()[1::2]:
-        label.set_visible(False)
-    
-    ax.set_yticks(np.arange(-0.5,1.25,0.25))
-    for label in ax.yaxis.get_ticklabels()[1::2]:
-        label.set_visible(False)
-
-    if subtract_neg is True:
-        ax.set_ylim(-0.1, 1.1)
+        ax = np.ravel(ax)
     else:
-        ax.set_ylim(0, 1.1)
+        ax = [ax]
 
-    ax.tick_params(axis='both', labelsize=fontsize-1)    
-    ax.set_xlim(I.E.values[0], I.E.values[-1])
-    ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
+    edc = get_edc(I, kx, ky, kx_int, ky_int, delay, delay_int)
+    edc = edc/np.max(edc)
+    
+    edc.plot(ax=ax[0], color = color, alpha=0.7, lw=2, label=label,
+                      path_effects=[pe.Stroke(linewidth=5, foreground='black', alpha=0.7), pe.Stroke(foreground='white', alpha=1), pe.Normal()])
+    ax[0].set_xlim(xlim[0], xlim[1])
+    ax[0].set_ylim(ylim[0], ylim[1])
+    ax[0].set_xlabel(fr'$E-E_{{\mathrm{{VBM}}}}$ [eV]', fontsize=fontsize)
+    ax[0].set_ylabel(fr'Normalized Intensity', fontsize=fontsize)
 
     fig.tight_layout()
 
@@ -519,7 +663,6 @@ def plot_momentum_maps(I, E, E_int, delays=None, delay_int=None, fig=None, ax=No
     - fig, ax, im (image handle for colorbar)
     """
     E = np.atleast_1d(E)
-    E = np.ravel(E)
 
     has_delay = "delay" in I.dims
 
@@ -545,21 +688,22 @@ def plot_momentum_maps(I, E, E_int, delays=None, delay_int=None, fig=None, ax=No
     nrows = kwargs.get("nrows", 1)
     ncols = kwargs.get("ncols", int(np.ceil(len(E) / nrows)))
     colorbar = kwargs.get("colorbar", False)
-    norm_to = kwargs.get("norm_to", "frame")
+    mask_radius = kwargs.get('mask_radius', None)
+    subtract_neg = kwargs.get('subtract_neg', False)
+    neg_delays = kwargs.get('neg_delays', (-250,-100))
 
     if ax is None or fig is None:
         fig, ax = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
         ax = np.ravel(ax)
     else:
-        ax = np.ravel(ax)
-
-    for i in range(len(E)):
-        frame = get_momentum_map(I, E[i], E_int, delays[i], delay_int)
+        ax = [ax]
         
-        if norm_to == "frame":
-            frame = frame / frame.max()
-        else:
-            frame = frame / norm_to
+    for i in range(len(E)):
+        frame = get_momentum_map(I, E[i], E_int, delays[i], delay_int, subtract_neg=subtract_neg, neg_delays=neg_delays)
+        if mask_radius is not None:
+            frame = frame.where((frame.kx**2 + frame.ky**2) < mask_radius**2, other=0)
+        
+        frame = frame / frame.max()
 
         im = frame.plot.imshow(
             ax=ax[i],
@@ -574,16 +718,17 @@ def plot_momentum_maps(I, E, E_int, delays=None, delay_int=None, fig=None, ax=No
         ax[i].set_xlim(-2, 2)
         ax[i].set_ylim(-2, 2)
         ax[i].set_xticks(np.arange(-2, 2.2, 1))
-        for label in ax[i].xaxis.get_ticklabels()[1::2]:
-            label.set_visible(False)
+        #for label in ax[i].xaxis.get_ticklabels()[1::2]:
+        #    label.set_visible(False)
 
         ax[i].set_yticks(np.arange(-2, 2.1, 1))
-        for label in ax[i].yaxis.get_ticklabels()[1::2]:
-            label.set_visible(False)
+        #for label in ax[i].yaxis.get_ticklabels()[1::2]:
+        #    label.set_visible(False)
 
-        ax[i].set_xlabel(r'$k_x$, $\AA^{{-1}}$', fontsize=fontsize)
-        ax[i].set_ylabel(r'$k_y$, $\AA^{{-1}}$', fontsize=fontsize)
-        ax[i].set_title(fr"$E$ = {E[i]:.2f} eV", fontsize=fontsize)
+        ax[i].tick_params(labelsize=fontsize-1)
+        ax[i].set_xlabel(r'$k_x$ [$\AA^{{-1}}]$', fontsize=fontsize)
+        ax[i].set_ylabel(r'$k_y$ [$\AA^{{-1}}]$', fontsize=fontsize)
+        ax[i].set_title(fr"$E-E_{{\mathrm{{VBM}}}}$ = ({E[i]:.2f} $\pm$ {E_int/2}) eV", fontsize=fontsize)
 
         # Optional panel label
         if panel_labels is True:
@@ -605,6 +750,30 @@ def plot_momentum_maps(I, E, E_int, delays=None, delay_int=None, fig=None, ax=No
     fig.tight_layout()
 
     return fig, ax, im
+
+def SavePeak(opt_params_x, opt_params_y, unc_x, unc_y, x_orig, y_orig, x_ang, y_ang, csv_file):
+    # Save Fit Params and Conditions of Gaussian Peaks along 2 directions
+    data = [['axis', 'origin', 'k0', 'FWHM', 'Amplitude', 'constant'],
+        ['x', x_orig[0], opt_params_x[0][0][0], opt_params_x[0][0][1], opt_params_x[0][0][2], opt_params_x[0][0][3]],
+        [x_ang, x_orig[1], unc_x[0][0][0], unc_x[0][0][1], unc_x[0][0][2], unc_x[0][0][3]],
+        ['y', y_orig[0], opt_params_y[0][0][0], opt_params_y[0][0][1], opt_params_y[0][0][2], opt_params_y[0][0][3]],
+        [y_ang, y_orig[1], unc_y[0][0][0], unc_y[0][0][1], unc_y[0][0][2], unc_y[0][0][3]]]
+    with open(csv_file, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerows(data)
+
+def LoadPeak(file):
+    # Load Fit Params and Conditions of Gaussian Peaks along 2 directions
+    array = np.genfromtxt(file, delimiter=',')
+    x_origin = (array[1][1], array[2][1])
+    x_rotation = array[2][0]
+    (x_k0, x_FWHM, x_A) = (array[1][2], array[1][3], array[1][4]) # (k0, FWHM, Amplitude)
+    x_uncertainties = (array[2][2], array[2][3], array[2][4])
+    y_origin = (array[3][1], array[4][1])
+    y_rotation = array[4][0]
+    (y_k0, y_FWHM, y_A) = (array[3][2], array[3][3], array[3][4]) # (k0, FWHM, Amplitude)
+    y_uncertainties = (array[4][2], array[4][3], array[4][4])
+    return x_k0, y_k0, x_FWHM, y_FWHM, (x_A+y_A)/2, x_origin, x_rotation, y_origin, y_rotation, x_uncertainties, y_uncertainties
 
 def plot_kx_frame(I_res, ky, ky_int, delays = None, delay_int = None, fig=None, ax=None, **kwargs):
     """
@@ -648,31 +817,20 @@ def plot_kx_frame(I_res, ky, ky_int, delays = None, delay_int = None, fig=None, 
     scale = kwargs.get("scale", [0, 1])
     energy_limits=kwargs.get("energy_limits", (1,3))
     E_enhance = kwargs.get("E_enhance", None)
-    subtract_neg = kwargs.get("subtract_neg", False)
-    neg_delays = kwargs.get("neg_delays", [-200, -100])
-    d1, d2 = neg_delays[0], neg_delays[1]
-    norm_to = kwargs.get("norm_to", "frame")
 
     if ax is None or fig is None:
         fig, ax = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
         ax = np.ravel(ax)
     else:
-        ax = np.ravel(ax)
-
-
+        ax = [ax]
+    
     # Loop over the energy list to plot time traces at each energy
     for i, delay in enumerate(delays):
         # Get the frame for the given energy, kx, and delay
-        kx_frame = get_kx_E_frame(I_res, ky, ky_int, delay, delay_int, subtract_neg=subtract_neg, neg_delays=neg_delays)
-        
+        kx_frame = get_kx_E_frame(I_res, ky, ky_int, delay, delay_int)
         if E_enhance is not None:    
             kx_frame = enhance_features(kx_frame, E_enhance, factor = 0, norm = True)
-            ax[i].axhline(E_enhance, linestyle = 'dashed', color = 'black', linewidth = 1)
-
-        if norm_to == "frame":
-            kx_frame = kx_frame / kx_frame.max()
-        else:
-            kx_frame = kx_frame / norm_to
+            ax[i].axhline(E_enhance, linestyle = 'dashed', color = 'white', linewidth = 1)
 
         im = kx_frame.T.plot.imshow(ax=ax[i], cmap=cmap, add_colorbar=False, vmin=scale[0], vmax=scale[1]) #kx, ky, t
         
@@ -680,18 +838,18 @@ def plot_kx_frame(I_res, ky, ky_int, delays = None, delay_int = None, fig=None, 
         ax[i].set_xticks(np.arange(-2,2.2,1))
         for label in ax[i].xaxis.get_ticklabels()[1::2]:
             label.set_visible(False)
-        ax[i].set_yticks(np.arange(-5,4.1,.25))
+        ax[i].set_yticks(np.arange(energy_limits[0],energy_limits[1]+0.1,.25))
         for label in ax[i].yaxis.get_ticklabels()[1::2]:
             label.set_visible(False)
         ax[i].yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
-        ax[i].set_xlabel(r'$k_x$, $\AA^{{-1}}$', fontsize = fontsize)
-        ax[i].set_ylabel(r'$E - E_{{VBM}}, eV$', fontsize = fontsize)
-        ax[i].set_title(fr'$k_y$ = {ky} $\pm$ {ky_int/2} $\AA^{{-1}}$', fontsize = fontsize)
-        ax[i].tick_params(axis='both', labelsize=fontsize)
+        ax[i].set_xlabel(r'$k_x$ [$\AA^{{-1}}$]', fontsize = fontsize)
+        ax[i].set_ylabel(r'$E - E_{\mathrm{VBM}}$ [eV]', fontsize = fontsize)
+        ax[i].set_title(fr'$k_y$ = ({ky} $\pm$ {ky_int/2}) $\AA^{{-1}}$', fontsize = fontsize)
+        ax[i].tick_params(axis='both', labelsize=fontsize-2)
         ax[i].set_xlim(-2,2)
         ax[i].set_ylim(energy_limits[0], energy_limits[1])
         #if has_delay and delays[0] is not None:
-        #    ax[i].text(-1.9, 2.7,  fr"$\Delta$t = {delay} $\pm$ {delay_int/2:.0f} fs", size=14)
+            #ax[i].text(-1.9, 2.7,  fr"$\Delta$t = {delay} $\pm$ {delay_int/2:.0f} fs", size=14)
     
     # Adjust layout
     fig.tight_layout()
@@ -737,48 +895,40 @@ def plot_ky_frame(I_res, kx, kx_int, delays=None, delay_int=None, fig=None, ax=N
     fontsize = kwargs.get("fontsize", 14)
     cmap = kwargs.get("cmap", "viridis")
     scale = kwargs.get("scale", [0, 1])
-    energy_limits=kwargs.get("energy_limits", (1,3))
+    energy_limits=kwargs.get("energy_limits", (-4,2))
     E_enhance = kwargs.get("E_enhance", None)
-    subtract_neg = kwargs.get("subtract_neg", False)
-    neg_delays = kwargs.get("neg_delays", [-200, -100])
-    d1, d2 = neg_delays[0], neg_delays[1]
-    norm_to = kwargs.get("norm_to", "frame")
 
     if ax is None or fig is None:
         fig, ax = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
         ax = np.ravel(ax)
     else:
-        ax = np.ravel(ax)
- 
+        ax = [ax]
+    
     # Loop over the energy list to plot time traces at each energy
     for i, delay in enumerate(delays):
         # Get the frame for the given energy, kx, and delay
-        ky_frame = get_ky_E_frame(I_res, kx, kx_int, delay, delay_int, subtract_neg=subtract_neg, neg_delays=neg_delays)
+        ky_frame = get_ky_E_frame(I_res, kx, kx_int, delay, delay_int)
         if E_enhance is not None:    
             ky_frame = enhance_features(ky_frame, E_enhance, factor = 0, norm = True)
-            ax[i].axhline(E_enhance, linestyle = 'dashed', color = 'black', linewidth = 1)
-                
-        if norm_to == "frame":
-            ky_frame = ky_frame / ky_frame.max()
-        else:
-            ky_frame = ky_frame / norm_to
+            ax[i].axhline(E_enhance, linestyle = 'dashed', color = 'white', linewidth = 1)
 
         ky_frame.T.plot.imshow(ax=ax[i], cmap=cmap, add_colorbar=False, vmin=scale[0], vmax=scale[1]) #kx, ky, t
         
         #ax[2].set_aspect(1)
         ax[i].set_xticks(np.arange(-2,2.2,1))
         for label in ax[i].xaxis.get_ticklabels()[1::2]:
-            label.set_visible(False)
-        ax[i].set_yticks(np.arange(-2,4.1,.25))
+            label.set_visible(True)
+        ax[i].set_yticks(np.arange(energy_limits[0],energy_limits[1]+0.1,.25))
         for label in ax[i].yaxis.get_ticklabels()[1::2]:
             label.set_visible(False)
         ax[i].yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
-        ax[i].set_xlabel(r'$k_y$, $\AA^{-1}$', fontsize = fontsize)
-        ax[i].set_ylabel(r'$E - E_{{VBM}}, eV$', fontsize = fontsize)
-        ax[i].set_title(fr'$k_x$ = {kx} $\pm$ {kx_int/2} $\AA^{{-1}}$', fontsize = fontsize)
-        ax[i].tick_params(axis='both', labelsize=fontsize)
+        ax[i].set_xlabel(r'$k_y$ [$\AA^{-1}$]', fontsize = fontsize)
+        ax[i].set_ylabel(r'$E - E_{\mathrm{VBM}}$ [eV]', fontsize = fontsize)
+        ax[i].set_title(fr'$k_x$ = ({kx} $\pm$ {kx_int/2}) $\AA^{{-1}}$', fontsize = fontsize)
+        ax[i].tick_params(axis='both', labelsize=fontsize-2)
         ax[i].set_xlim(-2,2)
         ax[i].set_ylim(energy_limits[0], energy_limits[1])
+        #ax[i].axhline(0.9, linestyle = 'dashed', color = 'black', linewidth = 1)
         #if has_delay and delays[0] is not None:
             #ax[i].text(-1.9, 2.7,  fr"$\Delta$t = {delay} $\pm$ {delay_int/2:.0f} fs", size=14)
     
@@ -879,13 +1029,15 @@ def plot_time_traces(I_res, E, E_int, k, k_int, norm_trace=True, subtract_neg=Tr
     Returns:
     - fig, ax (figure and axis objects).
     """
+    colormap = mpl.colormaps['viridis']
     fontsize = kwargs.get("fontsize", 14)
-    colors = kwargs.get("colors", ['Black', 'Maroon', 'Blue', 'Purple', 'Green', 'Grey'])
+    
     legend = kwargs.get("legend", True)
     label = kwargs.get("label", None)
 
     #(kx, ky), (kx_int, ky_int) = k, k_int
     E = np.atleast_1d(E)
+    colors = kwargs.get("colors", colormap(np.linspace(0.2,1, len(E))))
     #k = np.atleast_1d(k)
     #if len(E) > len(k):
      #   k = np.resize(k, len(E))
@@ -895,24 +1047,20 @@ def plot_time_traces(I_res, E, E_int, k, k_int, norm_trace=True, subtract_neg=Tr
     if fig is None or ax is None:
         fig, ax = plt.subplots(figsize=(8, 6))
     
-    has_delay = "delay" in I_res.dims
+    for i in range(len(E)):
+        trace = get_time_trace(I_res, E[i], E_int, k, k_int, norm_trace=norm_trace, subtract_neg=subtract_neg, neg_delays=neg_delays)
+        ax.plot(trace.coords['delay'].values, trace.values, label=None, color = 'white', linewidth=2,
+                path_effects=[pe.Stroke(linewidth=5, foreground='black', alpha=0.7), pe.Stroke(foreground='white', alpha=1), pe.Normal()], zorder=0)
 
-    if has_delay is False:
-        print('No Delay axis! Cannot plot time trace.')
-        
-        return
-
-    #for i, (E, k) in enumerate(zip(E, k)):
     for i, E in enumerate(E):
-        #if label is None:
-        label = f'E = {E:.2f} eV'
+        if label is None:
+            label = f'$E-E_{{\mathrm{{VBM}}}}$ = {E:.2f} eV'
 
         trace = get_time_trace(I_res, E, E_int, k, k_int, norm_trace=norm_trace, subtract_neg=subtract_neg, neg_delays=neg_delays)
-        
-        ax.plot(trace.coords['delay'].values, trace.values, label=label, color = colors[i], linewidth=2)
+        ax.plot(trace.coords['delay'].values, trace.values, label=label, color = colors[i], linewidth=2.5, alpha=0.7, zorder=2)
     
     # Formatting
-    ax.set_xlabel('Delay, fs', fontsize=fontsize)
+    ax.set_xlabel(fr'Delay $\Delta t$ [fs]', fontsize=fontsize)
     ax.set_ylabel('Intensity' , fontsize=fontsize)
     
     ax.xaxis.reset_ticks()
@@ -938,12 +1086,12 @@ def plot_time_traces(I_res, E, E_int, k, k_int, norm_trace=True, subtract_neg=Tr
     else:
         ax.set_ylim(0, 1.1)
 
-    ax.tick_params(axis='both', labelsize=fontsize-1)    
+    ax.tick_params(axis='both', labelsize=fontsize-1)
     ax.set_xlim(I_res.delay[1], I_res.delay[-1])
     ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
 
     if legend is True:
-        ax.legend(fontsize=fontsize-2, frameon=False)
+        ax.legend(fontsize=fontsize-1, frameon=True)
     
     fig.tight_layout()
 
@@ -956,12 +1104,9 @@ def plot_phoibos_frame(I_res, delay=None, delay_int=None, fig=None, ax=None, **k
     #ylabel = kwargs.get("ylabel", 'Intensity')
     fontsize = kwargs.get("fontsize", 14)
     figsize = kwargs.get("figsize", (8, 6))
+    energy_limits=kwargs.get("energy_limits", (I_res.E.values[0],I_res.E.values[-1]))
     neg_delays = kwargs.get("neg_delays", [-500, -100])
     E_enhance = kwargs.get("E_enhance", None)
-    angle, angle_int = kwargs.get("angle", None), kwargs.get("angle_int", None)
-    tilt, tilt_int = kwargs.get("tilt", None), kwargs.get("tilt_int", None)
-    angle_limits =  kwargs.get("angle_limits", None)
-    energy_limits  =kwargs.get("energy_limits", (I_res.E.values[0],I_res.E.values[-1]))
 
     if subtract_neg is True : 
         cmap = kwargs.get("cmap", cmap_LTL2)
@@ -994,106 +1139,23 @@ def plot_phoibos_frame(I_res, delay=None, delay_int=None, fig=None, ax=None, **k
     else:
         frame = I_res
 
-    if angle is not None and angle_int is not None:
-        frame = I_res.loc[{"angle":slice(angle - angle_int/2, angle + angle_int/2)}].mean(dim="angle")
-    elif tilt is not None and tilt_int is not None:
-        frame = I_res.loc[{"tilt":slice(tilt - tilt_int/2, tilt + tilt_int/2)}].mean(dim="tilt")
-
-    if E_enhance is not None and E_enhance < frame.E.values.max():
+    if E_enhance is not None:
         frame = enhance_features(frame, E_enhance, factor = 0, norm = True)
         ax.axhline(E_enhance, linestyle = 'dashed', color = 'black', linewidth = 1)
     else:
-        #frame = enhance_features(frame, energy_limits[0], factor = 0, norm = True)
-        frame = frame/np.max(frame)
-
+        frame = enhance_features(frame, energy_limits[0], factor = 0, norm = True)
+    
+    print(frame.shape)
     ph = frame.T.plot.imshow(ax = ax, vmin = scale[0], vmax = scale[1], cmap = cmap, add_colorbar=False)
    
-    ax.set_xlabel('Angle, deg', fontsize = fontsize)
-    ax.set_ylabel(r'E - E$_{VBM}$, eV', fontsize = fontsize)
+    ax.set_xlabel('Angle', fontsize = fontsize)
+    ax.set_ylabel(r'E - E$_{\mathrm{VBM}}$, eV', fontsize = fontsize)
     ax.set_yticks(np.arange(-5,3.5,0.5))
-    if angle_limits is not None:
-        ax.set_xlim(angle_limits[0], angle_limits[-1])
+    ax.set_xlim(I_res.angle[1], I_res.angle[-1])
     ax.set_ylim(energy_limits[0], energy_limits[1])
     ax.set_title('Frame')
     ax.axhline(energy_limits[0], linestyle = 'dashed', color = 'black', linewidth = 1)
-    ax.tick_params(axis='both', labelsize=fontsize-1)    
-
-    for label in ax.yaxis.get_ticklabels()[1::2]:
-        label.set_visible(False)
-    #hor = I_res.delay[-1] - I_res.delay[1]
-    #ver =  energy_limits[1] - energy_limits[0]
-    #aspra = hor/ver 
-    #ax[1].set_aspect(aspra)
-    ax.set_aspect("auto")
-
-    # Adjust layout to avoid overlap
-    fig.tight_layout()   
-
-def plot_tilt_map(I_res, delay=None, delay_int=None, fig=None, ax=None, **kwargs):
     
-    subtract_neg = kwargs.get("subtract_neg", False)
-    #xlabel = kwargs.get("xlabel", 'Delay, ps')
-    #ylabel = kwargs.get("ylabel", 'Intensity')
-    fontsize = kwargs.get("fontsize", 14)
-    figsize = kwargs.get("figsize", (8, 6))
-    energy_limits  =kwargs.get("energy_limits", (I_res.E.values[0],I_res.E.values[-1]))
-    neg_delays = kwargs.get("neg_delays", [-500, -100])
-    E_enhance = kwargs.get("E_enhance", None)
-    angle, angle_int = kwargs.get("angle", None), kwargs.get("angle_int", None)
-    tilt, tilt_int = kwargs.get("tilt", None), kwargs.get("tilt_int", None)
-    E = kwargs.get("E", 0)
-    E_int = kwargs.get("E_int", 0.2)
-
-    if subtract_neg is True : 
-        cmap = kwargs.get("cmap", cmap_LTL2)
-        scale = kwargs.get("scale", [-1, 1])
-    else:
-        cmap = kwargs.get("cmap", cmap_LTL)
-        scale = kwargs.get("scale", [0, 1])
-
-    d1, d2 = neg_delays[0], neg_delays[1]
-    
-    if ax is None or fig is None:
-        fig, ax = plt.subplots(figsize=(8, 6))
-    
-    if "delay" in I_res.dims:
-        I_diff = I_res - I_res.loc[{"delay":slice(d1,d2)}].mean(dim='delay')
-
-        if delay is not None:
-            if subtract_neg is True: 
-                frame = I_diff.loc[{"delay":slice(delay-delay_int/2,delay+delay_int/2)}].mean(dim='delay')
-
-            else:
-                frame = I_res.loc[{"delay":slice(delay-delay_int/2,delay+delay_int/2)}].mean(dim='delay')
-
-        if delay is None:
-            if subtract_neg is True: 
-                frame = I_diff.mean(dim='delay')
-
-            else:
-                frame = I_res.mean(dim='delay')
-    else:
-        frame = I_res
-
-    if angle is not None and angle_int is not None:
-        frame = frame.loc[{"angle":slice(angle - angle_int/2, angle + angle_int/2)}].mean(dim="angle")
-    elif tilt is not None and tilt_int is not None:
-        frame = frame.loc[{"tilt":slice(tilt - tilt_int/2, tilt + tilt_int/2)}].mean(dim="tilt")
-
-    frame = frame.loc[{"E":slice(E-E_int/2, E+E_int/2)}].mean(dim="E")
-    frame = frame/np.max(frame)
-
-    ph = frame.T.plot.imshow(ax = ax, vmin = scale[0], vmax = scale[1], cmap = cmap, add_colorbar=False)
-   
-    ax.set_xlabel('Angle, deg', fontsize = fontsize)
-    ax.set_ylabel('Angle, deg', fontsize = fontsize)
-    ax.set_yticks(np.arange(-30, 35, 5))
-    ax.set_xlim(I_res.angle[1], I_res.angle[-1])
-    ax.set_ylim(I_res.tilt[1], I_res.tilt[-1])
-    ax.set_title('Tilt Map')
-    #ax.axhline(energy_limits[0], linestyle = 'dashed', color = 'black', linewidth = 1)
-    ax.tick_params(axis='both', labelsize=fontsize-1)    
-
     for label in ax.yaxis.get_ticklabels()[1::2]:
         label.set_visible(False)
     #hor = I_res.delay[-1] - I_res.delay[1]
@@ -1127,8 +1189,6 @@ def plot_waterfall(I_res, kx, kx_int, ky=None, ky_int=None, fig=None, ax=None, *
     Returns:
     - fig, ax: figure and axis handles for the plot.
     """
-
-    has_delay = "delay" in I_res.dims
     subtract_neg = kwargs.get("subtract_neg", False)
 
     if subtract_neg is True : 
@@ -1146,17 +1206,13 @@ def plot_waterfall(I_res, kx, kx_int, ky=None, ky_int=None, fig=None, ax=None, *
     energy_limits=kwargs.get("energy_limits", (1,3))
     neg_delays = kwargs.get("neg_delays", [-250, -120])
     E_enhance = kwargs.get("E_enhance", None)
+    colorbar = kwargs.get('colorbar', False)
 
     d1, d2 = neg_delays[0], neg_delays[1]
     
     if ax is None or fig is None:
         fig, ax = plt.subplots(figsize=(8, 6))
     
-    if has_delay is False:
-        print('No Delay axis! Cannot plot Waterfall.')
-        
-        return
-
     waterfall = get_waterfall(I_res, kx, kx_int, ky, ky_int)
 
     if subtract_neg is True : 
@@ -1164,29 +1220,20 @@ def plot_waterfall(I_res, kx, kx_int, ky=None, ky_int=None, fig=None, ax=None, *
 
     if E_enhance is not None:
         waterfall = enhance_features(waterfall, E_enhance, factor = 0, norm = True)
-        ax.axhline(E_enhance, linestyle = 'dashed', color = 'black', linewidth = 1)
+        ax.axhline(E_enhance, linestyle = 'dashed', color = 'black', linewidth = 1.5)
     else:
         waterfall = enhance_features(waterfall, energy_limits[0], factor = 0, norm = True)
     
-    wf = waterfall.plot.imshow(ax = ax, vmin = scale[0], vmax = scale[1], cmap = cmap, add_colorbar=False)
+    wf = waterfall.plot.imshow(ax = ax, vmin = scale[0], vmax = scale[1], cmap = cmap, add_colorbar=colorbar)
     #waterfall.plot.imshow(ax = ax, cmap = cmap, add_colorbar=False)
    
-    # ax[i].set_xticks(np.arange(-4, 4, 1))
-    # for label in ax[i].xaxis.get_ticklabels()[1::2]:
-    #     label.set_visible(False)
-
-    # ax[i].set_yticks(np.arange(-2, 2.1, 1))
-    # for label in ax[i].yaxis.get_ticklabels()[1::2]:
-    #     label.set_visible(False)
-    ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
-    ax.xaxis.set_major_formatter(FormatStrFormatter('%.0f'))
-    ax.set_xlabel('Delay, fs', fontsize = fontsize)
-    ax.set_ylabel(r'E - E$_{VBM}$, eV', fontsize = fontsize)
+    ax.set_xlabel(r'Delay $\Delta t$ [fs]', fontsize = fontsize) #used to say fs, but I'm pretty sure the scale in the data is picoseconds
+    ax.set_ylabel(r'$E-E_{\mathrm{VBM}}$ [eV]', fontsize = fontsize)
     ax.set_yticks(np.arange(-1,3.5,0.25))
-    ax.tick_params(axis='both', labelsize=fontsize-1)    
+    ax.tick_params(axis='both', labelsize=fontsize-1)
     ax.set_xlim(I_res.delay[1], I_res.delay[-1])
     ax.set_ylim(energy_limits[0], energy_limits[1])
-    ax.set_title('$k$-Integrated')
+    #ax.set_title('$k$-Integrated')
     ax.axhline(energy_limits[0], linestyle = 'dashed', color = 'black', linewidth = 1)
     
     for label in ax.yaxis.get_ticklabels()[1::2]:
@@ -1202,12 +1249,162 @@ def plot_waterfall(I_res, kx, kx_int, ky=None, ky_int=None, fig=None, ax=None, *
 
     return fig, ax, wf
 
+def plot_mdcs(momentum_map, fig=None, ax=None, **kwargs):
+    '''
+    Plots a Momentum Map, then computes and plots two MDCs along arbitrary directions in the Momentum Map (Default kx- and ky-Axis).
+
+    Returns: ax_mdc_kx, mdc_kx, ax_mdc_ky, mdc_ky
+
+    params:
+    - momentum_map: Momentum Map from which mdcs should be extracted
+
+    Optional kwargs:
+    - k_zero_x: [kx, ky]-Origin for the Coordinate System of kx-MDC (Default: [0,0])
+    - k_zero_y: [kx, ky]-Origin for the Coordinate System of ky-MDC (Default: [0,0])
+    - angle_xaxis: Rotation of kx-Axis for kx-MDC in Degrees (Default: 0)
+    - angle_yaxis: Rotation of ky-Axis for ky-MDC in Degrees (Default: 0)
+    - x_length: Length of kx-MDC-Cut (Default: 4)
+    - y_length: Length of ky-MDC-Cut (Default: 4)
+    - mdc_x_width: Integration width of kx-MDC (Default: 0.3)
+    - mdc_y_width: Integration width of ky-MDC (Default: 0.3)
+    '''
+    k_zero_x = kwargs.get('k_zero_x', [0,0])
+    k_zero_y = kwargs.get('k_zero_y', [0,0])
+    x_length = kwargs.get('x_length', 4)
+    y_length = kwargs.get('y_length', 4)
+    mdc_x_width = kwargs.get('mdc_x_width', 0.3)
+    mdc_y_width = kwargs.get('mdc_y_width', 0.3)
+    angle_xaxis = kwargs.get('angle_xaxis', 0)
+    angle_yaxis = kwargs.get('angle_yaxis', 0)
+    cmap = kwargs.get('cmap', 'viridis')
+    fontsize = kwargs.get('fontsize', 15)
+
+    k_zero_x = np.array(k_zero_x)
+    k_zero_y = np.array(k_zero_y)
+    if ax is None or fig is None:
+        fig, ax = plt.subplots()
+
+    E = momentum_map.attrs['E']
+    E_int = momentum_map.attrs['E_int']
+    frame = momentum_map / momentum_map.max()
+    frame.plot.imshow(ax=ax, vmin=0, vmax=1, cmap=cmap, add_colorbar=False)
+    ax.set_aspect(1)
+    ax.set_xlim(-2,2)
+    ax.set_ylim(-2,2)
+    ax.set_yticks([-2, -1, 0, 1, 2])
+    ax.set_xticks([-2, -1, 0, 1, 2])
+    ax.set_xlabel(fr'$k_x$ [$\AA^{{-1}}]$', fontsize=fontsize)
+    ax.set_ylabel(fr'$k_y$ [$\AA^{{-1}}]$', fontsize=fontsize)
+    rect1 = add_rect(k_zero_x[0], x_length, k_zero_x[1], mdc_x_width, ax, edgecolor='lime', facecolor='lime', alpha = 0.2)
+    rect2 = add_rect(k_zero_y[0], mdc_y_width, k_zero_y[1], y_length, ax, edgecolor='yellow', facecolor='yellow', alpha = 0.2)
+
+    kx_vals = frame.kx.values
+    ky_vals = frame.ky.values
+    divider = make_axes_locatable(ax)
+    ax_mdc_x = divider.append_axes('top', 1, pad=0, sharex=ax)
+    ax_mdc_y = divider.append_axes('right', 1, pad=0, sharey=ax)
+
+    def Gauss(x,x0,FWHM,A):
+        sigma = FWHM / 2.355
+        return A * np.exp(- (x-x0)**2 /(2 * sigma**2))
+
+    # Interpolator
+    interp = RegularGridInterpolator((kx_vals, ky_vals), frame.transpose('kx', 'ky').values, bounds_error=False, fill_value=0)
+    
+    k_resolution = np.abs(frame.kx.values[0]-frame.kx.values[1])
+    N_length = int(np.floor(x_length / k_resolution))
+    N_width = int(np.floor(mdc_x_width / k_resolution))
+    # Rotate Rectangle Indicator
+    transformation_x = mpl.transforms.Affine2D().rotate_deg_around(k_zero_x[0], k_zero_x[1], angle_xaxis) + ax.transData
+    rect1.set_transform(transformation_x)
+    # Unit vector, and k-line
+    kx_unit = np.array([np.cos(np.deg2rad(angle_xaxis)), np.sin(np.deg2rad(angle_xaxis))])
+    k_line = np.linspace((-(x_length/2)*kx_unit + k_zero_x), ((x_length/2)*kx_unit + k_zero_x), num=N_length)
+    kx_line, ky_line = k_line[:, 0], k_line[:, 1]
+    # Normal vector
+    normal_vec = np.array([-kx_unit[1], kx_unit[0]])
+    w_offsets = np.linspace(-mdc_x_width/2, mdc_x_width/2, num=N_width)
+    # Prepare all sampling points
+    mdc_x = np.zeros(N_length)
+    for i, (kx_i, ky_i) in enumerate(zip(kx_line, ky_line)):
+        # Offset coordinates across the perpendicular direction
+        kx_offsets = kx_i + normal_vec[0] * w_offsets
+        ky_offsets = ky_i + normal_vec[1] * w_offsets
+
+        # Build grid for each offset and energy
+        kx_grid = kx_offsets[:, None]
+        ky_grid = ky_offsets[:, None]
+
+        pts = np.column_stack([kx_grid.ravel(), ky_grid.ravel()])
+        vals = interp(pts).reshape(len(w_offsets))
+        mdc_x[i] = np.nanmean(vals, axis=0)
+
+    mdc_x_Ivals = mdc_x
+    mdc_x_kvals = np.linspace(-(x_length/2), x_length/2, num=N_length)
+    mdc_x = xr.DataArray(mdc_x_Ivals, dims=('k'), coords={'k': mdc_x_kvals}, name='mdc', attrs={'E':E, 'E_int':E_int})
+
+    # Same thing for ky MDC
+    N_length = int(np.floor(y_length / k_resolution))
+    N_width = int(np.floor(mdc_y_width / k_resolution))
+    # Rotate Rectangle Indicator
+    transformation_y = mpl.transforms.Affine2D().rotate_deg_around(k_zero_y[0], k_zero_y[1], angle_yaxis) + ax.transData
+    rect2.set_transform(transformation_y)
+    # Unit vector, and k-line
+    ky_unit = np.array([-np.sin(np.deg2rad(angle_yaxis)), np.cos(np.deg2rad(angle_yaxis))])
+    k_line = np.linspace((k_zero_y - (y_length/2)*ky_unit), (k_zero_y + (y_length/2)*ky_unit), num=N_length)
+    kx_line, ky_line = k_line[:, 0], k_line[:, 1]
+    # Normal vector
+    normal_vec = np.array([-ky_unit[1], ky_unit[0]])
+    w_offsets = np.linspace(-mdc_y_width/2, mdc_y_width/2, num=N_width)
+    # Prepare all sampling points
+    mdc_y = np.zeros(N_length)
+    for i, (kx_i, ky_i) in enumerate(zip(kx_line, ky_line)):
+        # Offset coordinates across the perpendicular direction
+        kx_offsets = kx_i + normal_vec[0] * w_offsets
+        ky_offsets = ky_i + normal_vec[1] * w_offsets
+
+        # Build grid for each offset and energy
+        kx_grid = kx_offsets[:, None]
+        ky_grid = ky_offsets[:, None]
+
+        pts = np.column_stack([kx_grid.ravel(), ky_grid.ravel()])
+        vals = interp(pts).reshape(len(w_offsets))
+        mdc_y[i] = np.nanmean(vals, axis=0)
+
+    mdc_y_Ivals = mdc_y
+    mdc_y_kvals = np.linspace(-y_length/2, y_length/2, num=N_length)
+    mdc_y = xr.DataArray(mdc_y_Ivals, dims=('k'), coords={'k': mdc_y_kvals}, name='mdc')
+
+    colormap = mpl.colormaps['viridis']
+    colors = colormap(np.linspace(0.75, 1, 2))
+
+    ax_mdc_x.plot(mdc_x.k.values, mdc_x.values, color=colors[0], alpha=0.7, path_effects=[pe.Stroke(linewidth=3, foreground='black', alpha=0.6), pe.Stroke(foreground='white', alpha=1), pe.Normal()])
+    ax_mdc_y.plot(mdc_y.values, mdc_y.k.values, color=colors[1], alpha=0.7, path_effects=[pe.Stroke(linewidth=3, foreground='black', alpha=0.6), pe.Stroke(foreground='white', alpha=1), pe.Normal()])
+    
+    I_max_x = np.max(mdc_x)
+    I_max_y = np.max(mdc_y)
+
+    ax_mdc_x.xaxis.set_tick_params(labelbottom=False, direction='in')
+    ax_mdc_x.yaxis.set_tick_params(labelleft=False)
+    ax_mdc_x.set_ylim(0, I_max_x*1.05)
+    ax_mdc_x.set_yticks([0.5*I_max_x, I_max_x])
+    ax_mdc_x.set_title(fr"$E-E_{{\mathrm{{VBM}}}}$ = ({E:.2f} $\pm$ {E_int/2}) eV", fontsize=13)
+    ax_mdc_y.yaxis.set_tick_params(labelleft=False, direction='in')
+    ax_mdc_y.xaxis.set_tick_params(labelbottom=False)
+    ax_mdc_y.set_xlim(0, I_max_y*1.05)
+    ax_mdc_y.set_xticks([0.5*I_max_y, I_max_y])
+    fig.tight_layout()
+
+    return ax_mdc_x, mdc_x, ax_mdc_y, mdc_y
+
+
 def add_rect(dim1, dim1_int, dim2, dim2_int, ax, **kwargs):
         edgecolor = kwargs.get("edgecolor", None)
         facecolor = kwargs.get("facecolor", 'grey')
         alpha = kwargs.get("alpha", 0.5)
+        linewidth = kwargs.get('linewidth', 0.5)
 
-        rect = (Rectangle((dim1-dim1_int/2, dim2-dim2_int/2), dim1_int, dim2_int , linewidth=.5,\
+        rect = (Rectangle((dim1-dim1_int/2, dim2-dim2_int/2), dim1_int, dim2_int , linewidth=linewidth,\
                              edgecolor=edgecolor, facecolor=facecolor, alpha = alpha))
         ax.add_patch(rect) #Add rectangle to plot
         
@@ -1227,6 +1424,8 @@ def overlay_bz(shape_type, a, b, ax, color, **kwargs):
 
     repeat=kwargs.get("repeat", 0)
     rotation_deg=kwargs.get("rotation_deg", 0)
+    fontsize = kwargs.get('fontsize', 14)
+    markersize = kwargs.get('markersize', 4)
 
     def make_rect_bz(a, b):
         X = np.pi / a
@@ -1275,8 +1474,9 @@ def overlay_bz(shape_type, a, b, ax, color, **kwargs):
                                 facecolor='none', linewidth=2, alpha=0.75)
                 ax.add_patch(patch)
                 if i == 0 and j == 0 and np.allclose(center, (0, 0)):
-                    ax.plot(0, 0, 'ko', markersize=4, alpha=0.75)
-                    ax.text(0.1, 0.1, fr'$\Gamma$', size=12)
+                    #ax.plot(0, 0, 'o', markersize=markersize, alpha=0.75, color=color)
+                    #ax.text(0.1, 0.1, fr'$\overline{{\Gamma}}$', size=fontsize, color=color)
+                    null = 0
 
     else:
         # Rectangular grid tiling
@@ -1303,6 +1503,34 @@ def overlay_bz(shape_type, a, b, ax, color, **kwargs):
     #ax.text(0.1, 0.1, fr'$\Gamma$', size=12)
 
 #I_sum, I_pos, I_pos_sum, I_neg, I_neg_sum = get_data_chunks([-180,-100], t0, ax_delay_offset) #Get the Neg and Pos delay time arrays
+
+def CircleMasks(I_res, k, radius, repeat=1, **kwargs):
+
+    invert = kwargs.get('invert', False)
+    
+    kx, ky = k
+    angle_step = (2*np.pi) / repeat
+    points = []
+    for i in range(repeat):
+        angle = i * angle_step
+        x = kx * np.cos(angle) - ky * np.sin(angle)
+        y = kx * np.sin(angle) + ky * np.cos(angle)
+        points.append([x, y])
+    point_check = []
+    for point in points:
+        point_check.append(((I_res.kx - point[0])**2 + (I_res.ky - point[1])**2) < radius**2)
+    if repeat ==1:
+        total_check = point_check[0]
+    else:
+        total_check = np.copy(point_check[0])
+        for i in range(repeat-1):
+            total_check = np.logical_or(total_check, point_check[i+1])
+
+    if invert:
+        total_check = np.logical_not(total_check)
+    masked = I_res.where(total_check, other=0)
+    return masked
+
 def custom_colormap(CMAP, lower_portion_percentage):
     # create a colormap that consists of
     # - 1/5 : custom colormap, ranging from white to the first color of the colormap
@@ -1349,10 +1577,13 @@ def create_custom_diverging_colormap(map1, map2):
 
     return custom_colormap
 
-######
-# Functions For Fitting Data: Time Traces
+#%% Functions For Fitting Data: Time Traces
+
 def monoexp(t, A, tau):
-    return A * np.exp(-t / tau) * (t >= 0)  # Ensure decay starts at t=0
+    return A * np.exp(-(t) / tau) * (t >= 0)  # Ensure decay starts at t=t0
+
+def monoexp_const(t, A, tau, c):
+    return (A * np.exp(-t/tau) + c) * (t >= 0)
 
 # Define the biexponnential decay function (Exciton)    
 def biexp(t, A, tau1, B, tau2):
@@ -1423,8 +1654,10 @@ model_dict = {
         'monoexp': monoexp,
         'exp_rise_monoexp_decay': exp_rise_monoexp_decay,
         'biexp': biexp,
-        'exp_rise_biexp_decay': exp_rise_biexp_decay
+        'exp_rise_biexp_decay': exp_rise_biexp_decay,
+        'monoexp_const': monoexp_const
 }
+
 
 def fit_time_trace(fit_model, delay_axis, time_trace, p0, bounds, convolve=False, sigma_IRF=None):
     """
@@ -1450,13 +1683,13 @@ def fit_time_trace(fit_model, delay_axis, time_trace, p0, bounds, convolve=False
 
     base_model = model_dict[fit_model]
 
-    if convolve:
-        if sigma_IRF is None:
-            raise ValueError("sigma_IRF must be provided if convolve=True")
-        def model_func(t, *params):
-            return convolved_signal(t, base_model, sigma_IRF, *params)
-    else:
-        model_func = base_model
+    #if convolve:
+    #    if sigma_IRF is None:
+    #        raise ValueError("sigma_IRF must be provided if convolve=True")
+    #    def model_func(t, *params):
+    #        return convolved_signal(t, base_model, sigma_IRF, *params)
+    #else:
+    #    model_func = base_model
 
     if convolve:
         model_func = make_convolved_model(base_model, delay_axis, sigma_IRF)
@@ -1467,6 +1700,7 @@ def fit_time_trace(fit_model, delay_axis, time_trace, p0, bounds, convolve=False
     fit_curve = model_func(delay_axis, *popt)
 
     return popt, pcov, fit_curve
+
 
 import numpy as np
 
@@ -1487,7 +1721,8 @@ def print_fit_results(model_name, popt, pcov):
         'monoexp': ['A', 'tau_decay1'],
         'biexp': ['A', 'tau_decay1', 'B', 'tau_decay2'],
         'exp_rise_monoexp_decay': ["A", 'tau_rise', 'tau_decay1'],
-        'exp_rise_biexp_decay': ['A', 'tau_rise', 'D', 'tau_decay1', 'tau_decay2']
+        'exp_rise_biexp_decay': ['A', 'tau_rise', 'D', 'tau_decay1', 'tau_decay2'],
+        'monoexp_const' : ['A', 'tau_decay1', 'c']
         # Add more models here as needed
     }
 
@@ -1500,190 +1735,25 @@ def print_fit_results(model_name, popt, pcov):
     params_list = build_param_list(popt, errors, param_names)
 
     if model_name == 'monoexp':
-        plot_label = fr"$\tau_{1}$ = {params_list['tau_decay1']:.0f} fs"
+        plot_label = fr"$\tau_{1}$ = {params_list['tau_decay1']:.3f} fs"
     elif model_name == 'exp_rise_monoexp_decay':
-        plot_label = fr"$\tau_{{r}}$ = {params_list['tau_rise']:.0f} fs, $\tau_{1}$ = {params_list['tau_decay1']/1000:.1f} ps"
+        plot_label = fr"$\tau_{{r}}$ = {params_list['tau_rise']:.3f} fs, $\tau_{1}$ = {params_list['tau_decay1']:.3f} fs"
     elif model_name == 'biexp':
-        plot_label = fr"$\tau_{1}$ = {params_list['tau_decay1']:.0f} fs, $\tau_{2}$ = {params_list['tau_decay2']/1000:.1f} ps"
+        plot_label = fr"$\tau_{1}$ = ({params_list['tau_decay1']:.3f}$\pm${params_list['errors']['tau_decay1']:.3f}) fs {'\n'}$\tau_{2}$ = {params_list['tau_decay2']:.3f} fs"
     elif model_name == 'exp_rise_biexp_decay':
-        plot_label = fr"$\tau_{{r}}$ = {params_list['tau_rise']:.0f} fs, $\tau_{1}$ = {params_list['tau_decay1']/1000:.1f} ps, $\tau_{2}$ = {params_list['tau_decay2']/1000:.1f} ps"
+        plot_label = fr"$\tau_{{r}}$ = {params_list['tau_rise']:.3f} fs, $\tau_{1}$ = {params_list['tau_decay1']:.3f} fs, $\tau_{2}$ = {params_list['tau_decay2']:.3f} fs"
+    elif model_name == 'monoexp_const':
+        plot_label = fr'$\tau_{1}$ = {params_list['tau_decay1']:.3f} fs'
 
     print(f"\nFit Results for model: {model_name}")
     print("-" * 40)
     for name, val, err in zip(param_names, popt, errors):
-        print(f"{name:10s} = {val:10.4f} ± {err:7.4f}")
+        print(f"{name:10s} = {val:10.2f} ± {err:8.2f} ({100*err/val:6.2f} %)")
     print("-" * 40)
     
     return (params_list, plot_label)
 
-######
-# Functions for Fourier Transform Analysis
-
-def window_MM(kspace_frame, kx, ky, kx_int, ky_int, ax_kx, ax_ky, dkx, win_type, alpha, fwhm):    
-    
-    ### Deconvolve k-space momentum broadening, Gaussian with FWHM 0.063A-1
-    fwhm_pixel = fwhm/dkx
-    sigma = fwhm_pixel/2.355
-    # gaussian_kx = signal.gaussian(len(ax_kx), std = sigma)
-    # gaussian_kx = gaussian_kx/np.max(gaussian_kx)
-    # gaussian_ky = signal.gaussian(len(ax_ky), std = sigma)
-    # gaussian_ky = gaussian_ky/np.max(gaussian_ky)
-    
-    # gaussian_kxky = np.outer(gaussian_kx, gaussian_ky)
-    # gaussian_kxky = gaussian_kxky/np.max(gaussian_kxky)
-    # gaussian_kxky = np.outer(gaussian_kx, gaussian_ky)
-    #kx_cut_deconv = signal.deconvolve(kx_cut, gaussian_kx)
-    
-    ### Symmetrize Data
-    #kspace_frame_sym = xr.DataArray(np.zeros(kspace_frame.shape), coords = {"ky": ax_kx, "kx": ax_ky})
-    kspace_frame_ = kspace_frame.values
-    kspace_frame_rev = kspace_frame_[:,::-1]
-    
-    kspace_frame_sym = kspace_frame_ + kspace_frame_rev
-    kspace_frame_sym =  kspace_frame_sym/2
-    kspace_frame_sym = xr.DataArray(kspace_frame_sym, coords = {"ky": ax_ky, "kx": ax_kx})
-
-    ### Generate the Windows to Apodize the signal
-    k_x_i = np.abs(ax_kx.values-(kx-kx_int/2)).argmin()
-    k_x_f = np.abs(ax_kx.values-(kx+kx_int/2)).argmin()
-    k_y_i = np.abs(ax_kx.values-(ky-ky_int/2)).argmin()
-    k_y_f = np.abs(ax_kx.values-(ky+ky_int/2)).argmin()
-    #I_res.indexes["kx"].get_indexer([kx-kx_int/2], method = 'nearest')[0]
-    
-    # kx Axis
-    win_1_tuk = np.zeros(kspace_frame.shape[0])
-    win_1_box = np.zeros(kspace_frame.shape[0])
-
-    tuk_1 = signal.windows.tukey(k_x_f-k_x_i, alpha = 0.1)
-    box_1 = signal.windows.boxcar(k_x_f-k_x_i)
-    win_1_tuk[k_x_i:k_x_f] = tuk_1
-    win_1_box[k_x_i:k_x_f] = box_1
-
-    # ky Axis
-    win_2_tuk = np.zeros(kspace_frame.shape[1])
-    win_2_box = np.zeros(kspace_frame.shape[1])
-
-    tuk_2 = signal.windows.tukey(k_y_f-k_y_i, alpha = alpha)
-    box_2 = signal.windows.boxcar(k_y_f-k_y_i)
-    win_2_tuk[k_y_i:k_y_f] = tuk_2
-    win_2_box[k_y_i:k_y_f] = box_2
-
-    # Combine to (kx, ky) Window
-    window_2D_tukey = np.outer(win_2_tuk, win_1_tuk) # 2D tukey
-    window_2D_box = np.outer(win_2_box, win_1_box) # 2D Square Window
-    window_tukey_box = np.outer(win_2_tuk, win_1_box) # Tukey + Box
-
-    if win_type == 'gaussian':
-        win_1_gauss = np.zeros(kspace_frame.shape[0])
-        gaus_1 = signal.windows.gaussian(k_x_f-k_x_i, alpha)
-        win_1_gauss[k_x_i:k_x_f] = gaus_1
-        window_2D_gaussian = np.outer(win_1_gauss, win_2_box)
-        kspace_window = window_2D_gaussian
-        
-    # 2D Tukey    
-    if win_type == 1:
-        kspace_window = xr.DataArray(window_2D_tukey, coords = {"ky": ax_ky, "kx": ax_kx}, dims = ["ky", "kx"])
-
-    if win_type == 'square':
-        kspace_window = window_2D_box
-
-    if win_type == 'tukey, square':
-        kspace_window = xr.DataArray(window_tukey_box, coords = {"ky": ax_ky, "kx": ax_kx}, dims = ["ky", "kx"])
-
-    kspace_frame_sym_win = kspace_frame_sym*kspace_window
-    kspace_frame_win = kspace_frame*(kspace_window)
-        
-    return kspace_frame_sym, kspace_frame_win, kspace_frame_sym_win, kspace_window/np.max(kspace_window)
-
-def FFT_MM(MM_frame, zeropad, dkx, ax_kx, ax_ky):
- 
-    I_MM = MM_frame.where(MM_frame >= 0)
-
-    ### Define real-space axis for FFT
-    # Shuo Method ?
-    #N = 1 #(zplength)Fs
-    #Fs = 1/((2*np.max(ax_kx.values))/len(ax_kx.values))
-    #r_axis = np.arange(0,zplength)*Fs/1
-    #r_axis = r_axis - (np.max(r_axis)/2)
-    #r_axis = r_axis/(1*zplength)
-
-    k_step = dkx
-    zplength = zeropad #5*k_length+1
-    max_r = 1/(2*k_step)
-    r_axis = np.linspace(-max_r, max_r, num = zplength)
-    r_axis = 2*np.pi * np.fft.fftshift(np.fft.fftfreq(zplength, d=dkx)) #Include 2pi factor
-    r_axis = 0.1 * r_axis # Covnert to nm from Angstrom
-
-    ### Do the FFT operations: |Psi(kx,ky)|^2 --> |Psi(x,y)|^2
-    I_MM = I_MM/np.max(I_MM) # |Psi(kx,ky)|^2
-    root_I_MM = np.sqrt(I_MM) # Psi(kx,ky)
-
-    fft_frame = np.fft.fft2(root_I_MM, [zplength, zplength])
-    fft_frame = np.fft.fftshift(fft_frame, axes = (0,1))
-    fft_frame = np.abs(fft_frame) # Psi(rx,ry)
-    psi_xy = xr.DataArray(fft_frame, coords = {"y": r_axis, "x": r_axis}) #Extracted intrinsic peak after deconv. k-space resolutation
-
-    I_xy = np.square((fft_frame))
-    I_xy = I_xy/np.max(I_xy) # Psi(rx,ry)|^2
-    I_xy = xr.DataArray(I_xy, coords = {"y": r_axis, "x": r_axis}) #Extracted intrinsic peak after deconv. k-space resolutation
-
-    ### Take kx and ky cuts
-    #kx_cut = I_MM.loc[{"ky":slice(0-.05,0+.05)}].mean(dim="ky")
-    #ky_cut = I_MM.loc[{"kx":slice(X/2-.05,X/2+.05)}].mean(dim="kx")
-    #kx_cut = kx_cut/np.max(kx_cut)
-    #ky_cut = ky_cut/np.max(ky_cut)
-
-    ### real space I_xy = Psi*^2 cuts along x and y
-    x_cut = I_xy.loc[{"y":slice(0)}].mean(dim='y')
-    y_cut = I_xy.loc[{"x":slice(0)}].mean(dim='x')
-    x_cut = x_cut/np.max(x_cut)
-    y_cut = y_cut/np.max(y_cut)
-
-    ### From the Half-Width at Half-Max
-
-    x_rad_hwhm = (np.abs(x_cut[int(zplength/2)-10:int(zplength/2)+200] - 0.5)).argmin()
-    x_rad_hwhm = int(zplength/2)-10 + x_rad_hwhm
-    x_rad_hwhm = r_axis[x_rad_hwhm]
-
-    y_rad_hwhm = (np.abs(y_cut[int(zplength/2)-10:] - 0.5)).argmin()
-    y_rad_hwhm = int(zplength/2)-10 + y_rad_hwhm
-    y_rad_hwhm = r_axis[y_rad_hwhm]
-
-    ### r-weighted distribution / 2D Radial Distribution ~ r*|Psi(r)|^2
-
-    x_rad_dist = np.abs(r_axis) * x_cut
-    y_rad_dist = np.abs(r_axis) * y_cut
-    x_rad_dist = x_rad_dist / np.max(x_rad_dist)
-    y_rad_dist = y_rad_dist / np.max(y_rad_dist)
-
-    x_brad = (x_rad_dist[int(zplength/2)-10:int(zplength/2)+100]).argmax().values
-    y_brad = (y_rad_dist[int(zplength/2)-10:int(zplength/2)+100]).argmax().values
-
-    x_brad = r_axis[int(zplength/2)-10 + x_brad]
-    y_brad = r_axis[int(zplength/2)-10 + y_brad]
-
-    return r_axis, I_xy, x_cut, y_cut, x_rad_hwhm, y_rad_hwhm, x_brad, y_brad
-    
-def lorentzian(x, amp_1, mean_1, stddev_1, offset):
-    
-    b = (x - mean_1)/(stddev_1/2)
-    l1 = amp_1/(1+b**2) + offset
-    
-    return l1
-    
-def gaussian(x, amp_1, mean_1, stddev_1, offset):
-    
-    g1 = amp_1 * np.exp(-0.5*((x - mean_1) / stddev_1)**2)+offset
-    
-    return g1
-
-def two_gaussians(x, amp_1, amp_2, mean_1, mean_2, stddev_1, stddev_2, offset):
-    
-    g1 = amp_1 * np.exp(-0.5*((x - mean_1) / stddev_1)**2)
-    g2 = amp_2 * np.exp(-0.5*((x - mean_2) / stddev_2)**2)
-    
-    g = g1 + g2 + offset
-    return g
-
 cmap_LTL = custom_colormap('viridis', 0.2)
-cmap_LTL2 = create_custom_diverging_colormap('Blues', 'viridis')
+cmap_LTL2 = create_custom_diverging_colormap('Reds', 'viridis')
+
+# %%
