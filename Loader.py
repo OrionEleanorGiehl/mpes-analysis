@@ -76,6 +76,8 @@ class DataLoader:
                     res = xr.DataArray(i_data, dims = ("kx", "ky", "E", "delay"), coords = [self.ax_kx, self.ax_ky, self.ax_E, self.ax_ADC])
                 
                 res = res.assign_coords(E=(res.E-self.offsets[0]))
+                # I had binned my NiI2 data in ps but wanted to convert to fs.
+                # Because re-binnning would take a lot of time, I just multiplied the delay by 1000 here as a quick and dirty fix.
                 res = res.assign_coords(delay=((res.delay * 1000)-self.offsets[1]))
 
             elif i_data.ndim < 4:
