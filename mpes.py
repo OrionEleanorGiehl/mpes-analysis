@@ -272,13 +272,16 @@ def enhance_features(I_res, Ein, factor, norm):
     I2 = I_res.loc[{"E":slice(Ein,6.5)}]
 
     if norm is True:
+        enhance_factor = 1/np.max(I2.to_numpy())
         I1 = I1/np.max(I1)
         I2 = I2/np.max(I2)
     else:
         I1 = I1/factor[0]
         I2 = I2/factor[1]
+        enhance_factor = 1/factor[1]
         
     I3 = xr.concat([I1, I2], dim = "E")
+    I3.attrs['enhance_factor'] = enhance_factor
     
     return I3
 
@@ -367,6 +370,8 @@ def find_t0(trace_ex, delay_limits, fig=None, ax=None, **kwargs):
 def t0_alt(I_res, Labels, fig=None, ax=None, **kwargs):
     '''
     Determines t0 by fitting an Error Function to the VB Dynamics
+    (Really awkward implementation because this was one of the first things I wrote before I knew how most of the code worked.
+    Only exists in this current form because I was too busy doing other stuff to clean this up)
     
     params:
     - I_res: List of Normalized Spectra
@@ -489,6 +494,8 @@ def t0_alt(I_res, Labels, fig=None, ax=None, **kwargs):
 def VBMfromRisingEdge(I_res, Labels, fig=None, ax=None, **kwargs):
     '''
     Determines E_VBM by fitting a linear Function to the Rising Edge
+    (Really awkward implementation because this was one of the first things I wrote before I knew how most of the code worked.
+    Only exists in this current form because I was too busy doing other stuff to clean this up)
 
     Parameters:
     - I_res: List of Normalized Spectra
@@ -1033,7 +1040,7 @@ def plot_time_traces(I_res, E, E_int, k, k_int, norm_trace=True, subtract_neg=Tr
     fontsize = kwargs.get("fontsize", 14)
     
     legend = kwargs.get("legend", True)
-    label = kwargs.get("label", None)
+    label = kwargs.get("label", [fr'$E-E_{{\mathrm{{VBM}}}}$ = {e:.2f} eV' for e in E])
 
     #(kx, ky), (kx_int, ky_int) = k, k_int
     E = np.atleast_1d(E)
@@ -1047,16 +1054,16 @@ def plot_time_traces(I_res, E, E_int, k, k_int, norm_trace=True, subtract_neg=Tr
     if fig is None or ax is None:
         fig, ax = plt.subplots(figsize=(8, 6))
     
-    for i in range(len(E)):
-        trace = get_time_trace(I_res, E[i], E_int, k, k_int, norm_trace=norm_trace, subtract_neg=subtract_neg, neg_delays=neg_delays)
+    for e in E:
+        trace = get_time_trace(I_res, e, E_int, k, k_int, norm_trace=norm_trace, subtract_neg=subtract_neg, neg_delays=neg_delays)
         ax.plot(trace.coords['delay'].values, trace.values, label=None, color = 'white', linewidth=2,
                 path_effects=[pe.Stroke(linewidth=5, foreground='black', alpha=0.7), pe.Stroke(foreground='white', alpha=1), pe.Normal()], zorder=0)
 
-    for i, E in enumerate(E):
-        if label is None:
-            label = f'$E-E_{{\mathrm{{VBM}}}}$ = {E:.2f} eV'
+    for i, (e, label) in enumerate(zip(E, label)):
+        #if label is None:
+        #    label = f'$E-E_{{\mathrm{{VBM}}}}$ = {E:.2f} eV'
 
-        trace = get_time_trace(I_res, E, E_int, k, k_int, norm_trace=norm_trace, subtract_neg=subtract_neg, neg_delays=neg_delays)
+        trace = get_time_trace(I_res, e, E_int, k, k_int, norm_trace=norm_trace, subtract_neg=subtract_neg, neg_delays=neg_delays)
         ax.plot(trace.coords['delay'].values, trace.values, label=label, color = colors[i], linewidth=2.5, alpha=0.7, zorder=2)
     
     # Formatting
@@ -1221,6 +1228,8 @@ def plot_waterfall(I_res, kx, kx_int, ky=None, ky_int=None, fig=None, ax=None, *
     if E_enhance is not None:
         waterfall = enhance_features(waterfall, E_enhance, factor = 0, norm = True)
         ax.axhline(E_enhance, linestyle = 'dashed', color = 'black', linewidth = 1.5)
+        #ax.text(x=I_res.delay[1]+50, y=E_enhance-0.1, s=fr'x {waterfall.attrs['enhance_factor']:.0f}', fontsize=fontsize-1)
+        print(fr'Renormalization Factor : {waterfall.attrs['enhance_factor']:.0f}')
     else:
         waterfall = enhance_features(waterfall, energy_limits[0], factor = 0, norm = True)
     
@@ -1267,6 +1276,8 @@ def plot_mdcs(momentum_map, fig=None, ax=None, **kwargs):
     - y_length: Length of ky-MDC-Cut (Default: 4)
     - mdc_x_width: Integration width of kx-MDC (Default: 0.3)
     - mdc_y_width: Integration width of ky-MDC (Default: 0.3)
+    - cmap: Colormap (Default: viridis)
+    - fonrsize: Fontsize (Default: 15)
     '''
     k_zero_x = kwargs.get('k_zero_x', [0,0])
     k_zero_y = kwargs.get('k_zero_y', [0,0])
@@ -1284,8 +1295,10 @@ def plot_mdcs(momentum_map, fig=None, ax=None, **kwargs):
     if ax is None or fig is None:
         fig, ax = plt.subplots()
 
+    # Read energy and energy integration from momentum map
     E = momentum_map.attrs['E']
     E_int = momentum_map.attrs['E_int']
+    # Plot momentum map
     frame = momentum_map / momentum_map.max()
     frame.plot.imshow(ax=ax, vmin=0, vmax=1, cmap=cmap, add_colorbar=False)
     ax.set_aspect(1)
@@ -1295,22 +1308,21 @@ def plot_mdcs(momentum_map, fig=None, ax=None, **kwargs):
     ax.set_xticks([-2, -1, 0, 1, 2])
     ax.set_xlabel(fr'$k_x$ [$\AA^{{-1}}]$', fontsize=fontsize)
     ax.set_ylabel(fr'$k_y$ [$\AA^{{-1}}]$', fontsize=fontsize)
+    # Plot rectangle indicator for integration range of MDCs
     rect1 = add_rect(k_zero_x[0], x_length, k_zero_x[1], mdc_x_width, ax, edgecolor='lime', facecolor='lime', alpha = 0.2)
     rect2 = add_rect(k_zero_y[0], mdc_y_width, k_zero_y[1], y_length, ax, edgecolor='yellow', facecolor='yellow', alpha = 0.2)
 
     kx_vals = frame.kx.values
     ky_vals = frame.ky.values
+    # Add new axes objects for MDCs
     divider = make_axes_locatable(ax)
     ax_mdc_x = divider.append_axes('top', 1, pad=0, sharex=ax)
     ax_mdc_y = divider.append_axes('right', 1, pad=0, sharey=ax)
 
-    def Gauss(x,x0,FWHM,A):
-        sigma = FWHM / 2.355
-        return A * np.exp(- (x-x0)**2 /(2 * sigma**2))
-
     # Interpolator
     interp = RegularGridInterpolator((kx_vals, ky_vals), frame.transpose('kx', 'ky').values, bounds_error=False, fill_value=0)
     
+    # Read momentum resolution of data and compute number of points in MDC
     k_resolution = np.abs(frame.kx.values[0]-frame.kx.values[1])
     N_length = int(np.floor(x_length / k_resolution))
     N_width = int(np.floor(mdc_x_width / k_resolution))
@@ -1339,6 +1351,7 @@ def plot_mdcs(momentum_map, fig=None, ax=None, **kwargs):
         vals = interp(pts).reshape(len(w_offsets))
         mdc_x[i] = np.nanmean(vals, axis=0)
 
+    # Write values to MDC xarray
     mdc_x_Ivals = mdc_x
     mdc_x_kvals = np.linspace(-(x_length/2), x_length/2, num=N_length)
     mdc_x = xr.DataArray(mdc_x_Ivals, dims=('k'), coords={'k': mdc_x_kvals}, name='mdc', attrs={'E':E, 'E_int':E_int})
@@ -1371,10 +1384,12 @@ def plot_mdcs(momentum_map, fig=None, ax=None, **kwargs):
         vals = interp(pts).reshape(len(w_offsets))
         mdc_y[i] = np.nanmean(vals, axis=0)
 
+    # Write values to MDC xarray
     mdc_y_Ivals = mdc_y
     mdc_y_kvals = np.linspace(-y_length/2, y_length/2, num=N_length)
     mdc_y = xr.DataArray(mdc_y_Ivals, dims=('k'), coords={'k': mdc_y_kvals}, name='mdc')
 
+    # Plot MDCs
     colormap = mpl.colormaps['viridis']
     colors = colormap(np.linspace(0.75, 1, 2))
 
@@ -1383,7 +1398,7 @@ def plot_mdcs(momentum_map, fig=None, ax=None, **kwargs):
     
     I_max_x = np.max(mdc_x)
     I_max_y = np.max(mdc_y)
-
+    # Formatting
     ax_mdc_x.xaxis.set_tick_params(labelbottom=False, direction='in')
     ax_mdc_x.yaxis.set_tick_params(labelleft=False)
     ax_mdc_x.set_ylim(0, I_max_x*1.05)
